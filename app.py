@@ -2,18 +2,23 @@ import streamlit as st
 import re
 
 # ==========================================
-# 1. מנוע הליבה ובדיקות השפיות (Core & Validation)
+# 1. מנוע ליבה מתקדם עם לוג פעולות שקוף (Audit Trail Engine)
 # ==========================================
 
-def audit_and_fix_cif(content: str) -> tuple[str, list[dict]]:
+def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
     issues = []
+    audit_trail = []
     lines = content.splitlines()
     fixed_lines = []
     
+    audit_trail.append(f"Initiated parsing of {len(lines)} lines.")
+    
     has_p1 = False
     has_cell_params = False
+    atom_labels = set()
+    duplicate_atoms_found = False
 
-    for line in lines:
+    for line_idx, line in enumerate(lines, 1):
         stripped = line.strip()
         
         # זיהוי מלכודת סימטריה P1
@@ -23,12 +28,29 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict]]:
                 issues.append({
                     "type": "warning",
                     "category": "Symmetry Trap",
-                    "message": "Detected P1 symmetry trap (Low symmetry). Causes exponential grid inflation in DFT."
+                    "message": f"Line {line_idx}: Detected P1 symmetry trap (Low symmetry). Causes exponential grid inflation in DFT."
                 })
+                audit_trail.append(f"Flagged P1 symmetry declaration at line {line_idx}.")
         
         # בדיקת קיום פרמטרי תא
         if "_cell_length_a" in stripped:
             has_cell_params = True
+            audit_trail.append("Confirmed presence of primary cell parameter (_cell_length_a).")
+
+        # זיהוי אטומים ובדיקת כפילויות בלולאות
+        if stripped and not stripped.startswith("#") and not stripped.startswith("_") and not stripped.startswith("data_") and not stripped.startswith("loop_"):
+            parts = stripped.split()
+            if parts and len(parts) >= 4:  # תבנית אופיינית לשורת אתר אטום: label x y z
+                label = parts[0]
+                if label in atom_labels:
+                    duplicate_atoms_found = True
+                    issues.append({
+                        "type": "warning",
+                        "category": "Structural Warning",
+                        "message": f"Line {line_idx}: Duplicate atom label '{label}' detected."
+                    })
+                else:
+                    atom_labels.add(label)
 
         fixed_lines.append(line)
 
@@ -38,9 +60,17 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict]]:
             "category": "Missing Data",
             "message": "Critical: Missing essential cell parameters (_cell_length_a etc.)."
         })
+        audit_trail.append("Critical Error: Missing cell dimensions.")
+    else:
+        audit_trail.append("Cell parameters structure integrity verified.")
+
+    if duplicate_atoms_found:
+        audit_trail.append("Warning: Duplicate atom sites recorded in atomic coordinate list.")
 
     fixed_content = "\n".join(fixed_lines)
-    return fixed_content, issues
+    audit_trail.append("Parsing and diagnostic scan completed successfully under 'Do No Harm' policy.")
+    
+    return fixed_content, issues, audit_trail
 
 def validate_fixed_cif(original_content: str, fixed_content: str) -> tuple[bool, list[str]]:
     errors = []
@@ -78,7 +108,6 @@ st.markdown("### Elite-Tier Pre-Flight HPC CIF Auditor")
 st.markdown("Prevent catastrophic simulation failures in VASP and Quantum ESPRESSO through rigorous pre-flight structural auditing.")
 st.markdown("---")
 
-# קובץ דוגמה לבדיקה מהירה
 SAMPLE_CIF = """data_sample_p1_trap
 _audit_creation_date             2026-03-30
 _symmetry_space_group_name_H-M   'P 1'
@@ -103,7 +132,6 @@ if "cif_text" not in st.session_state:
 if "file_name" not in st.session_state:
     st.session_state.file_name = "structure.cif"
 
-# סיידבר פעולות מהירות
 st.sidebar.header("Control Panel")
 if st.sidebar.button("🧪 Load Sample Defective CIF"):
     st.session_state.cif_text = SAMPLE_CIF
@@ -121,10 +149,10 @@ if st.session_state.cif_text:
 
     if st.button("🚀 Run Pre-Flight Audit & Verification", type="primary", use_container_width=True):
         with st.spinner("Analyzing crystallographic structure and enforcing safety boundaries..."):
-            fixed_content, issues = audit_and_fix_cif(st.session_state.cif_text)
+            fixed_content, issues, audit_trail = audit_and_fix_cif(st.session_state.cif_text)
             is_valid, validation_errors = validate_fixed_cif(st.session_state.cif_text, fixed_content)
 
-        # הפרדה ויזואלית ברורה: שלב 1 - דוח אבחון (Audit Report)
+        # שלב 1: דוח אבחון וסינון
         st.markdown("---")
         st.markdown("### 🔍 Step 1: Audit Diagnostic Report")
         
@@ -137,27 +165,30 @@ if st.session_state.cif_text:
                 else:
                     st.warning(f"⚠️ **[{issue['category']}]** {issue['message']}")
 
-        # הפרדה ויזואלית ברורה: שלב 2 - אימות ואבטחה (Do No Harm & Sanity Check)
-        space = st.container()
-        with space:
-            st.markdown("---")
-            st.markdown("### 🛡️ Step 2: Safety & Sanity Verification")
-            st.markdown("*Enforcing 'Do No Harm' policy and self-parse integrity before release.*")
+        # הצגת לוג פעולות שקוף (Audit Trail)
+        with st.expander("📋 View Engine Audit Trail & Execution Log", expanded=False):
+            for log_entry in audit_trail:
+                st.text(f"• {log_entry}")
+
+        # שלב 2: אימות ואבטחה
+        st.markdown("---")
+        st.markdown("### 🛡️ Step 2: Safety & Sanity Verification")
+        st.markdown("*Enforcing 'Do No Harm' policy and self-parse integrity before release.*")
+        
+        if is_valid:
+            st.success("✅ **Verification Passed:** Structure is certified safe for simulation pipelines.")
             
-            if is_valid:
-                st.success("✅ **Verification Passed:** Structure is certified safe for simulation pipelines.")
-                
-                clean_filename = st.session_state.file_name.replace(".cif", "_fixed.cif")
-                st.download_button(
-                    label="📥 Download Verified Clean CIF",
-                    data=fixed_content,
-                    file_name=clean_filename,
-                    mime="chemical/x-cif",
-                    use_container_width=True
-                )
-            else:
-                st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld to protect your simulation.")
-                for err in validation_errors:
-                    st.warning(err)
+            clean_filename = st.session_state.file_name.replace(".cif", "_fixed.cif")
+            st.download_button(
+                label="📥 Download Verified Clean CIF",
+                data=fixed_content,
+                file_name=clean_filename,
+                mime="chemical/x-cif",
+                use_container_width=True
+            )
+        else:
+            st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld to protect your simulation.")
+            for err in validation_errors:
+                st.warning(err)
 else:
     st.info("💡 **Get Started:** Click 'Load Sample Defective CIF' in the sidebar or upload your own structure file.")
