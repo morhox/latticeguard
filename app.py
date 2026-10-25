@@ -1,5 +1,7 @@
 import streamlit as st
 import math
+import io
+import zipfile
 
 # ==========================================
 # 1. מנוע הליבה: אבחון מתקדם, הגנה ובדיקות שפיות
@@ -117,7 +119,7 @@ def validate_fixed_cif(original_content: str, fixed_content: str) -> tuple[bool,
 
 
 # ==========================================
-# 2. ממשק משתמש פרימיום: Batch Processing & Elite UI
+# 2. ממשק משתמש פרימיום: Batch & ZIP Export
 # ==========================================
 
 st.set_page_config(
@@ -153,7 +155,6 @@ Si2 0.00000 0.00000 0.00000
 st.sidebar.header("Control Panel")
 load_sample = st.sidebar.button("🧪 Load Sample Defective CIF")
 
-# תמיכה בהעלאת מספר קבצים במקביל (Batch Processing)
 uploaded_files = st.file_uploader("Upload Structure File(s)", type=["cif", "txt"], accept_multiple_files=True)
 
 files_to_process = []
@@ -171,6 +172,8 @@ elif uploaded_files:
 if files_to_process:
     st.markdown(f"### 📦 Batch Processing Dashboard ({len(files_to_process)} files loaded)")
     
+    successful_files = []
+
     for file_name, cif_content in files_to_process:
         with st.container():
             st.markdown(f"---")
@@ -179,11 +182,9 @@ if files_to_process:
             with st.expander("📁 View Raw Content", expanded=False):
                 st.text_area("Raw CIF", cif_content, height=120, key=f"raw_{file_name}")
 
-            # הרצת אנליזה
             fixed_content, issues, audit_trail = audit_and_fix_cif(cif_content)
             is_valid, validation_errors = validate_fixed_cif(cif_content, fixed_content)
 
-            # דוח אבחון
             st.markdown("#### 🔍 Audit Diagnostic Report")
             if not issues:
                 st.success("✨ **Audit Clean:** No structural traps or missing parameters identified.")
@@ -194,16 +195,16 @@ if files_to_process:
                     else:
                         st.warning(f"⚠️ **[{issue['category']}]** {issue['message']}")
 
-            # לוג פעולות
             with st.expander("📋 View Execution Audit Trail", expanded=False):
                 for log_entry in audit_trail:
                     st.text(f"• {log_entry}")
 
-            # אימות ואבטחה
             st.markdown("#### 🛡️ Safety & Sanity Verification")
             if is_valid:
                 st.success("✅ **Verification Passed:** Structure is certified safe for simulation pipelines.")
                 clean_filename = file_name.replace(".cif", "_fixed.cif")
+                successful_files.append((clean_filename, fixed_content))
+                
                 st.download_button(
                     label=f"📥 Download Verified Clean ({clean_filename})",
                     data=fixed_content,
@@ -215,5 +216,26 @@ if files_to_process:
                 st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld.")
                 for err in validation_errors:
                     st.warning(err)
+
+    # כפתור הורדת ZIP מרכזי אם יש יותר מקובץ אחד תקין או אפילו שורה מרכזית
+    if successful_files:
+        st.markdown("---")
+        st.markdown("### 🗂️ Batch Archive Export")
+        
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for fname, fcontent in successful_files:
+                zip_file.writestr(fname, fcontent)
+        
+        zip_buffer.seek(0)
+        
+        st.download_button(
+            label=f"📦 Download All Verified Structures as ZIP ({len(successful_files)} files)",
+            data=zip_buffer,
+            file_name="latticeguard_verified_batch.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True
+        )
 else:
     st.info("💡 **Get Started:** Click 'Load Sample Defective CIF' in the sidebar or upload one or multiple `.cif` files for batch processing.")
