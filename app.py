@@ -1,8 +1,8 @@
 import streamlit as st
-import re
+import math
 
 # ==========================================
-# 1. מנוע ליבה מתקדם עם לוג פעולות שקוף (Audit Trail Engine)
+# 1. מנוע ליבה מתקדם עם בדיקת התנגשויות אטומים (Interatomic Distance Check)
 # ==========================================
 
 def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
@@ -15,7 +15,7 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
     
     has_p1 = False
     has_cell_params = False
-    atom_labels = set()
+    atoms = []
     duplicate_atoms_found = False
 
     for line_idx, line in enumerate(lines, 1):
@@ -32,27 +32,50 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
                 })
                 audit_trail.append(f"Flagged P1 symmetry declaration at line {line_idx}.")
         
-        # בדיקת קיום פרמטרי תא
+        # זיהוי פרמטרי תא
         if "_cell_length_a" in stripped:
             has_cell_params = True
             audit_trail.append("Confirmed presence of primary cell parameter (_cell_length_a).")
 
-        # זיהוי אטומים ובדיקת כפילויות בלולאות
+        # איסוף קואורדינציות אטומים לבדיקת התנגשויות
         if stripped and not stripped.startswith("#") and not stripped.startswith("_") and not stripped.startswith("data_") and not stripped.startswith("loop_"):
             parts = stripped.split()
-            if parts and len(parts) >= 4:  # תבנית אופיינית לשורת אתר אטום: label x y z
+            if parts and len(parts) >= 4:
                 label = parts[0]
-                if label in atom_labels:
-                    duplicate_atoms_found = True
-                    issues.append({
-                        "type": "warning",
-                        "category": "Structural Warning",
-                        "message": f"Line {line_idx}: Duplicate atom label '{label}' detected."
-                    })
-                else:
-                    atom_labels.add(label)
+                try:
+                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                    
+                    # בדיקת כפילויות תווית
+                    if any(a[0] == label for a in atoms):
+                        duplicate_atoms_found = True
+                        issues.append({
+                            "type": "warning",
+                            "category": "Structural Warning",
+                            "message": f"Line {line_idx}: Duplicate atom label '{label}' detected."
+                        })
+                    
+                    atoms.append((label, x, y, z, line_idx))
+                except ValueError:
+                    pass  # לא שורת קואורדינציות תקנית, ממשיכים הלאה
 
         fixed_lines.append(line)
+
+    # בדיקת מרחקים מינימליים בין אטומים (התנגשויות פיזיקליות בסיסיות בקואורדינציות פראקציונליות)
+    # מחפשים אטומים קרובים באופן חשוד (< 0.1 יחידות פראקציונליות)
+    for i in range(len(atoms)):
+        for j in range(i + 1, len(atoms)):
+            l1, x1, y1, z1, idx1 = atoms[i]
+            l2, x2, y2, z2, idx2 = atoms[j]
+            
+            # חישוב מרחק פראקציונלי מקורב
+            dist_sq = (x1 - x2)**2 + (y1 - y2)**2 + (z1 - z2)**2
+            if dist_sq < 0.0001 and dist_sq > 0.0:  # קרובים מדי או חופפים כמעט לחלוטין
+                issues.append({
+                    "type": "error",
+                    "category": "Interatomic Clash",
+                    "message": f"Potential atomic clash between '{l1}' (line {idx1}) and '{l2}' (line {idx2}). Distance is near zero."
+                })
+                audit_trail.append(f"Critical: Spatial clash detected between {l1} and {l2}.")
 
     if not has_cell_params and len(content.strip()) > 0:
         issues.append({
@@ -124,7 +147,7 @@ _atom_site_fract_x
 _atom_site_fract_y
 _atom_site_fract_z
 Si1 0.00000 0.00000 0.00000
-Si2 0.25000 0.25000 0.25000
+Si2 0.00000 0.00000 0.00000
 """
 
 if "cif_text" not in st.session_state:
