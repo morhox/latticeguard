@@ -5,41 +5,24 @@ import re
 
 st.set_page_config(
     page_title="LatticeGuard - HPC CIF Auditor",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # מטריצת רדיוסים קוולנטיים (אנגסטרם) - מבוסס על נתוני Cordero et al.
 COVALENT_RADII = {
-    'H': 0.31,
-    'He': 0.28,
-    'Li': 1.28,
-    'Be': 0.96,
-    'B': 0.84,
-    'C': 0.76,
-    'N': 0.71,
-    'O': 0.66,
-    'F': 0.57,
-    'Na': 1.66,
-    'Mg': 1.41,
-    'Al': 1.21,
-    'Si': 1.11,
-    'P': 1.07,
-    'S': 1.05,
-    'Cl': 1.02,
-    'K': 2.03,
-    'Ca': 1.76,
-    'Ti': 1.60,
-    'Fe': 1.56,
-    'Cu': 1.32,
-    'Zn': 1.22
+    'H': 0.31, 'He': 0.28, 'Li': 1.28, 'Be': 0.96, 'B': 0.84,
+    'C': 0.76, 'N': 0.71, 'O': 0.66, 'F': 0.57, 'Na': 1.66,
+    'Mg': 1.41, 'Al': 1.21, 'Si': 1.11, 'P': 1.07, 'S': 1.05,
+    'Cl': 1.02, 'K': 2.03, 'Ca': 1.76, 'Ti': 1.60, 'Fe': 1.56,
+    'Cu': 1.32, 'Zn': 1.22
 }
 
 DEFAULT_RADIUS = 1.0
-CLASH_SCALING_FACTOR = 0.55
 
-def check_interatomic_clashes(atoms_list):
+def check_interatomic_clashes(atoms_list, scaling_factor):
     """
-    בדיקת התנגשויות מרחביות מותנית לפי זוגות אטומים (Element-specific radii matrix).
+    בדיקת התנגשויות מרחביות מותנית לפי זוגות אטומים (Element-specific radii matrix) עם סף ניתן להתאמה.
     """
     clashes = []
     n = len(atoms_list)
@@ -55,7 +38,7 @@ def check_interatomic_clashes(atoms_list):
             r_a = COVALENT_RADII.get(elem_a, DEFAULT_RADIUS)
             r_b = COVALENT_RADII.get(elem_b, DEFAULT_RADIUS)
             
-            dynamic_threshold = (r_a + r_b) * CLASH_SCALING_FACTOR
+            dynamic_threshold = (r_a + r_b) * scaling_factor
             
             dx = atom_a['x'] - atom_b['x']
             dy = atom_a['y'] - atom_b['y']
@@ -72,7 +55,7 @@ def check_interatomic_clashes(atoms_list):
                 
     return clashes
 
-def audit_cif(filename, content):
+def audit_cif(filename, content, scaling_factor):
     audit_log = []
     is_valid = True
     
@@ -85,14 +68,6 @@ def audit_cif(filename, content):
         audit_log.append("WARNING: Low-symmetry P1 space group detected. This may cause exponential grid inflation in DFT calculations.")
     else:
         audit_log.append("OK: Space group symmetry verified.")
-
-    # ניתוח פרמטרי תא יחידה
-    cell_params = {}
-    for param in ['a', 'b', 'c', 'alpha', 'beta', 'gamma']:
-        match = re.search(rf"_cell_length_{param}\s+([0-9\.]+)", content, re.IGNORECASE) or \
-                re.search(rf"_cell_angle_{param}\s+([0-9\.]+)", content, re.IGNORECASE)
-        if match:
-            cell_params[param] = float(match.group(1))
 
     # חילוץ קואורדינטות אטומים לבדיקת התנגשויות
     atoms = []
@@ -141,7 +116,7 @@ def audit_cif(filename, content):
 
     clashes = []
     if atoms:
-        clashes = check_interatomic_clashes(atoms)
+        clashes = check_interatomic_clashes(atoms, scaling_factor)
         if clashes:
             is_valid = False
             audit_log.append(f"ERROR: Detected {len(clashes)} interatomic spatial clashes based on dynamic covalent radii thresholds.")
@@ -153,25 +128,80 @@ def audit_cif(filename, content):
     return is_valid, audit_log, clashes
 
 def main():
+    # סיידבר הגדרות מתקדם
+    st.sidebar.title("LatticeGuard Controls")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Physics Engine Settings")
+    
+    scaling_factor = st.sidebar.slider(
+        "Clash Tolerance Scaling Factor",
+        min_value=0.40,
+        max_value=0.80,
+        value=0.55,
+        step=0.01,
+        help="Controls the strictness of the interatomic distance threshold relative to the covalent radii sum."
+    )
+    
+    st.sidebar.markdown("---")
+    st.sidebar.info("System Status: Online\nEngine: Element-Specific Covalent Matrix v2.0")
+
+    # אזור ראשי
     st.title("LatticeGuard: Pre-Flight HPC CIF Auditor")
-    st.markdown("Rigorous pre-flight safety gatekeeper for VASP, Quantum ESPRESSO, and DFT simulations.")
+    st.markdown("Elite-tier pre-flight safety gatekeeper for VASP, Quantum ESPRESSO, and DFT simulations.")
     st.markdown("---")
 
-    uploaded_files = st.file_uploader("Upload CIF Structure Files", type=["cif"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Upload CIF Structure Files for Batch Audit", type=["cif"], accept_multiple_files=True)
 
     if uploaded_files:
-        st.subheader("Audit Results & Batch Summary")
+        st.subheader("Batch Audit Overview")
         
+        # הרצת אודיט על כל הקבצים כדי לאסוף סטטיסטיקות למדדים
+        results_summary = []
         zip_buffer = io.BytesIO()
         
+        total_files = len(uploaded_files)
+        passed_count = 0
+        failed_count = 0
+        total_clashes = 0
+        
+        for uploaded_file in uploaded_files:
+            file_content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
+            filename = uploaded_file.name
+            is_valid, audit_log, clashes = audit_cif(filename, file_content, scaling_factor)
+            
+            if is_valid:
+                passed_count += 1
+            else:
+                failed_count += 1
+                total_clashes += len(clashes)
+                
+            results_summary.append({
+                'filename': filename,
+                'is_valid': is_valid,
+                'audit_log': audit_log,
+                'clashes': clashes,
+                'content': file_content
+            })
+
+        # הצגת כרטיסיות מדדים עליונות (Metrics)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Files", total_files)
+        col2.metric("Passed Audit", passed_count)
+        col3.metric("Failed / Flagged", failed_count)
+        col4.metric("Total Clashes Found", total_clashes)
+        
+        st.markdown("---")
+        st.subheader("Detailed File Audit Logs")
+
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for uploaded_file in uploaded_files:
-                file_content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-                filename = uploaded_file.name
+            for item in results_summary:
+                filename = item['filename']
+                is_valid = item['is_valid']
+                audit_log = item['audit_log']
+                clashes = item['clashes']
                 
-                is_valid, audit_log, clashes = audit_cif(filename, file_content)
-                
-                with st.expander(f"File: {filename} - {'PASSED' if is_valid else 'FAILED'}"):
+                status_label = "PASSED" if is_valid else "FAILED"
+                with st.expander(f"[{status_label}] {filename}"):
                     for log_entry in audit_log:
                         if log_entry.startswith("ERROR"):
                             st.error(log_entry)
@@ -181,22 +211,27 @@ def main():
                             st.success(log_entry)
                             
                     if not is_valid and clashes:
-                        st.write("Detailed Clash List:")
+                        st.markdown("**Detailed Clash Breakdown:**")
                         for c in clashes:
-                            st.text(f"Atom {c['atom1']} <-> {c['atom2']} | Distance: {c['distance']} A (Threshold: {c['threshold']} A)")
+                            st.text(f"  - Atom {c['atom1']} <-> {c['atom2']} | Measured: {c['distance']} A | Min Threshold: {c['threshold']} A")
                 
                 if is_valid:
-                    zip_file.writestr(f"verified_{filename}", file_content)
+                    zip_file.writestr(f"verified_{filename}", item['content'])
                     
         zip_buffer.seek(0)
         
         st.markdown("---")
-        st.download_button(
-            label="Download Verified Structures (ZIP)",
-            data=zip_buffer,
-            file_name="latticeguard_verified_structures.zip",
-            mime="application/zip"
-        )
+        col_dl1, col_dl2 = st.columns([2, 1])
+        with col_dl1:
+            st.markdown("Export all verified structures that successfully cleared the safety gatekeeper.")
+        with col_dl2:
+            st.download_button(
+                label="Download Verified Archive (ZIP)",
+                data=zip_buffer,
+                file_name="latticeguard_verified_structures.zip",
+                mime="application/zip",
+                use_container_width=True
+            )
 
 if __name__ == "__main__":
     main()
