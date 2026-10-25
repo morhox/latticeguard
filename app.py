@@ -292,13 +292,19 @@ def audit_and_fix_cif(content: str):
 
     return fixed_content, issues, audit_trail, poscar_content, qe_content, xyz_content, report_dict
 
-def validate_fixed_cif(fixed_content: str):
+def validate_fixed_cif(fixed_content: str, issues: list):
     errors = []
     if not fixed_content or len(fixed_content.strip()) < 10:
         errors.append("Critical: Fixed content is empty.")
     if "NaN" in fixed_content or "inf" in fixed_content:
         errors.append("Warning: Contains unphysical NaN values.")
-    is_valid = len([e for e in errors if "Critical" in e]) == 0
+    
+    # אכיפת חסימה מוחלטת אם יש שגיאות או התנגשויות קריטיות ממנוע האודיט
+    for issue in issues:
+        if issue["type"] == "error":
+            errors.append(f"Gatekeeper Block: [{issue['category']}] {issue['message']}")
+            
+    is_valid = len(errors) == 0
     return is_valid, errors
 
 # ==========================================
@@ -365,7 +371,7 @@ if files_to_process:
                 st.text_area("Raw CIF", cif_content, height=120, key=f"raw_{file_name}")
 
             fixed_content, issues, audit_trail, poscar, qe, xyz, report_dict = audit_and_fix_cif(cif_content)
-            is_valid, validation_errors = validate_fixed_cif(fixed_content)
+            is_valid, validation_errors = validate_fixed_cif(fixed_content, issues)
 
             st.markdown("#### 🔍 Audit Diagnostic Report")
             if not issues:
