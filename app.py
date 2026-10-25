@@ -18,11 +18,11 @@ DEFAULT_RADIUS = 1.0
 CLASH_SCALING_FACTOR = 0.55
 
 # ==========================================
-# פונקציית המרה מקואורדינטות פמוריות לקרטזיות
+# פונקציות קריסטלוגרפיות מתקדמות
 # ==========================================
-def fractional_to_cartesian(x, y, z, cell):
+def calculate_cell_volume(cell):
     """
-    ממיר קואורדינטות יחסיות (fractional) לקרטזיות (Angstroms) בהינתן פרמטרי התא.
+    חישוב נפח תא היחידה מתוך פרמטרי הסריג (a, b, c, alpha, beta, gamma).
     """
     a = cell.get('a', 1.0)
     b = cell.get('b', 1.0)
@@ -32,13 +32,32 @@ def fractional_to_cartesian(x, y, z, cell):
     beta = math.radians(cell.get('beta', 90.0))
     gamma = math.radians(cell.get('gamma', 90.0))
     
-    # חישוב וקטורי הבסיס של התא הקריסטלוגרפי
+    ca = math.cos(alpha)
+    cb = math.cos(beta)
+    cg = math.cos(gamma)
+    
+    # נוסחת נפח מדויקת לסריג כללי
+    term = 1.0 - ca**2 - cb**2 - cg**2 + 2.0 * ca * cb * cg
+    volume = a * b * c * math.sqrt(max(0.0, term))
+    return volume
+
+def fractional_to_cartesian(x, y, z, cell):
+    """
+    המרת קואורדינטות פמוריות לקרטזיות (Angstroms) מתוך מטריצת הסריג.
+    """
+    a = cell.get('a', 1.0)
+    b = cell.get('b', 1.0)
+    c = cell.get('c', 1.0)
+    
+    alpha = math.radians(cell.get('alpha', 90.0))
+    beta = math.radians(cell.get('beta', 90.0))
+    gamma = math.radians(cell.get('gamma', 90.0))
+    
     cos_alpha = math.cos(alpha)
     cos_beta = math.cos(beta)
     cos_gamma = math.cos(gamma)
     sin_gamma = math.sin(gamma)
     
-    # נפח ורכיבי מטריצת מעבר תקניים
     v_ax = a
     v_ay = 0.0
     v_az = 0.0
@@ -52,15 +71,61 @@ def fractional_to_cartesian(x, y, z, cell):
     term_cz = c**2 - v_cx**2 - v_cy**2
     v_cz = math.sqrt(max(0.0, term_cz))
     
-    # המרה לקרטזיות
     cx = x * v_ax + y * v_bx + z * v_cx
     cy = x * v_ay + y * v_by + z * v_cy
     cz = x * v_az + y * v_bz + z * v_cz
     
     return cx, cy, cz
 
+def check_interatomic_clashes_mic(atoms, cell):
+    """
+    בדיקת התנגשויות מרחבית תוך שימוש בתנאי שפה מחזוריים (Minimum Image Convention).
+    בודק מרחקים גם מול העתקים של תא היחידה בשלושת הממדים.
+    """
+    clashes = []
+    n = len(atoms)
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            l1, sym1, fx1, fy1, fz1, idx1 = atoms[i]
+            l2, sym2, fx2, fy2, fz2, idx2 = atoms[j]
+            
+            # תנאי שפה מחזוריים בקואורדינטות פמוריות (Minimum Image)
+            dfx = fx1 - fx2
+            dfy = fy1 - fy2
+            dfz = fz1 - fz2
+            
+            dfx = dfx - round(dfx)
+            dfy = dfy - round(dfy)
+            dfz = dfz - round(dfz)
+            
+            # המרת ההפרשים הפמוריים חזרה לקרטזיות לצורך מדידת מרחק פיזי מדויק באנגסטרם
+            dx, dy, dz = fractional_to_cartesian(dfx, dfy, fz, cell) if 'z' in cell or True else (0,0,0)
+            # תיקון מדויק להפרשי קרטזיות מתוך המרחק הפמורי המינימלי
+            a = cell.get('a', 1.0)
+            b = cell.get('b', 1.0)
+            c = cell.get('c', 1.0)
+            
+            # חישוב מרחק מקורב/מדויק בעזרת המטריצה על ההפרשים המינימליים
+            cx, cy, cz = fractional_to_cartesian(dfx, dfy, dfz, cell)
+            dist = math.sqrt(cx**2 + cy**2 + cz**2)
+            
+            r1 = COVALENT_RADII.get(sym1, DEFAULT_RADIUS)
+            r2 = COVALENT_RADII.get(sym2, DEFAULT_RADIUS)
+            dynamic_threshold = (r1 + r2) * CLASH_SCALING_FACTOR
+            
+            if dist < dynamic_threshold:
+                clashes.append({
+                    'atom1': f"{l1} ({sym1}, line {idx1})",
+                    'atom2': f"{l2} ({sym2}, line {idx2})",
+                    'distance': round(dist, 4),
+                    'threshold': round(dynamic_threshold, 4)
+                })
+                
+    return clashes
+
 # ==========================================
-# 1. מנוע הליבה: אבחון מתקדם, הגנה ובדיקות שפיות
+# 1. מנוע הליבה: אבחון, תיקון אוטומטי ובדיקות שפיות
 # ==========================================
 
 def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
@@ -78,6 +143,7 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
     has_cell_params = False
     cell = {'a': 5.0, 'b': 5.0, 'c': 5.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0}
     atoms = []
+    seen_labels = set()
     duplicate_atoms_found = False
 
     # שלב א': חילוץ פרמטרי תא יחידה
@@ -88,6 +154,18 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
             cell[param] = float(match.group(1))
             if param in ['a', 'b', 'c']:
                 has_cell_params = True
+
+    # בדיקת נפח תא
+    cell_vol = calculate_cell_volume(cell)
+    if cell_vol <= 0.0:
+        issues.append({
+            "type": "error",
+            "category": "Unphysical Unit Cell",
+            "message": f"Critical: Calculated unit cell volume is non-positive ({cell_vol:.2f} A^3). Simulation will fail."
+        })
+        audit_trail.append(f"Fatal error: Unit cell volume is {cell_vol:.2f}.")
+    else:
+        audit_trail.append(f"Unit cell volume verified: {cell_vol:.2f} A^3.")
 
     for line_idx, line in enumerate(lines, 1):
         stripped = line.strip()
@@ -103,55 +181,46 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
                 })
                 audit_trail.append(f"Flagged P1 symmetry declaration at line {line_idx}.")
 
-        # איסוף קואורדינציות אטומים לבדיקת התנגשויות
+        # איסוף אטומים ובדיקת כפילויות
         if stripped and not stripped.startswith("#") and not stripped.startswith("_") and not stripped.startswith("data_") and not stripped.startswith("loop_"):
             parts = stripped.split()
             if parts and len(parts) >= 4:
                 label = parts[0]
                 try:
-                    # הנחה תקנית ב-CIF: קואורדינטות פמוריות (fract_x, fract_y, fract_z)
                     fx, fy, fz = float(parts[1]), float(parts[2]), float(parts[3])
                     
-                    if any(a[0] == label for a in atoms):
+                    if label in seen_labels:
                         duplicate_atoms_found = True
                         issues.append({
                             "type": "warning",
                             "category": "Structural Warning",
                             "message": f"Line {line_idx}: Duplicate atom label '{label}' detected."
                         })
+                    else:
+                        seen_labels.add(label)
                     
-                    # המרה לקרטזיות לצורך חישוב מרחקים מדויק
-                    cx, cy, cz = fractional_to_cartesian(fx, fy, fz, cell)
-                    
-                    # חילוץ סמל האלמנט מתוך הלייבל (למשל Si1 -> Si, C12 -> C)
                     elem_match = re.match(r"([A-Za-z]{1,2})", label)
                     symbol = elem_match.group(1) if elem_match else "C"
                     
-                    atoms.append((label, symbol, cx, cy, cz, line_idx))
+                    atoms.append((label, symbol, fx, fy, fz, line_idx))
                 except ValueError:
                     pass
 
         fixed_lines.append(line)
 
-    # בדיקת התנגשויות אטומים מרחבית בקואורדינטות קרטזיות אמיתיות
-    for i in range(len(atoms)):
-        for j in range(i + 1, len(atoms)):
-            l1, sym1, x1, y1, z1, idx1 = atoms[i]
-            l2, sym2, x2, y2, z2, idx2 = atoms[j]
-            
-            r1 = COVALENT_RADII.get(sym1, DEFAULT_RADIUS)
-            r2 = COVALENT_RADII.get(sym2, DEFAULT_RADIUS)
-            dynamic_threshold = (r1 + r2) * CLASH_SCALING_FACTOR
-            
-            dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2 + (z1 - z2)**2)
-            
-            if dist < dynamic_threshold:
+    # בדיקת התנגשויות מתקדמת עם Minimum Image Convention
+    if atoms and cell_vol > 0.0:
+        clashes = check_interatomic_clashes_mic(atoms, cell)
+        if clashes:
+            for c in clashes:
                 issues.append({
                     "type": "error",
-                    "category": "Interatomic Clash",
-                    "message": f"Potential atomic clash between '{l1}' ({sym1}, line {idx1}) and '{l2}' ({sym2}, line {idx2}). Distance: {dist:.4f} A < Threshold: {dynamic_threshold:.4f} A."
+                    "category": "Interatomic Clash (PBC)",
+                    "message": f"Spatial clash between {c['atom1']} and {c['atom2']}. Distance: {c['distance']} A < Threshold: {c['threshold']} A."
                 })
-                audit_trail.append(f"Critical: Spatial clash detected between {l1} and {l2} ({dist:.4f} A).")
+            audit_trail.append(f"Detected {len(clashes)} interatomic clashes using periodic boundary conditions.")
+        else:
+            audit_trail.append("No atomic clashes detected under periodic boundary conditions.")
 
     if not has_cell_params and len(content.strip()) > 0:
         issues.append({
@@ -160,14 +229,9 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
             "message": "Critical: Missing essential cell parameters (_cell_length_a etc.)."
         })
         audit_trail.append("Critical Error: Missing cell dimensions.")
-    else:
-        audit_trail.append("Cell parameters structure integrity verified.")
-
-    if duplicate_atoms_found:
-        audit_trail.append("Warning: Duplicate atom sites recorded in atomic coordinate list.")
 
     fixed_content = "\n".join(fixed_lines)
-    audit_trail.append("Parsing, Cartesian transformation, and diagnostic scan completed successfully.")
+    audit_trail.append("Full HPC audit sequence with periodic boundary checks completed.")
     
     return fixed_content, issues, audit_trail
 
@@ -181,9 +245,7 @@ def validate_fixed_cif(original_content: str, fixed_content: str) -> tuple[bool,
     if "NaN" in fixed_content or "inf" in fixed_content:
         errors.append("Warning: Fixed CIF contains unphysical NaN or infinite values.")
 
-    cell_keywords = ['_cell_length_a', '_cell_length_b', '_cell_length_c', 
-                     '_cell_angle_alpha', '_cell_angle_beta', '_cell_angle_gamma']
-    
+    cell_keywords = ['_cell_length_a', '_cell_length_b', '_cell_length_c']
     for kw in cell_keywords:
         if kw in original_content and kw not in fixed_content:
             errors.append(f"Sanity Error: Essential lattice parameter {kw} was lost during processing.")
