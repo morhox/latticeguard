@@ -18,6 +18,48 @@ DEFAULT_RADIUS = 1.0
 CLASH_SCALING_FACTOR = 0.55
 
 # ==========================================
+# פונקציית המרה מקואורדינטות פמוריות לקרטזיות
+# ==========================================
+def fractional_to_cartesian(x, y, z, cell):
+    """
+    ממיר קואורדינטות יחסיות (fractional) לקרטזיות (Angstroms) בהינתן פרמטרי התא.
+    """
+    a = cell.get('a', 1.0)
+    b = cell.get('b', 1.0)
+    c = cell.get('c', 1.0)
+    
+    alpha = math.radians(cell.get('alpha', 90.0))
+    beta = math.radians(cell.get('beta', 90.0))
+    gamma = math.radians(cell.get('gamma', 90.0))
+    
+    # חישוב וקטורי הבסיס של התא הקריסטלוגרפי
+    cos_alpha = math.cos(alpha)
+    cos_beta = math.cos(beta)
+    cos_gamma = math.cos(gamma)
+    sin_gamma = math.sin(gamma)
+    
+    # נפח ורכיבי מטריצת מעבר תקניים
+    v_ax = a
+    v_ay = 0.0
+    v_az = 0.0
+    
+    v_bx = b * cos_gamma
+    v_by = b * sin_gamma
+    v_bz = 0.0
+    
+    v_cx = c * cos_beta
+    v_cy = c * (cos_alpha - cos_beta * cos_gamma) / sin_gamma
+    term_cz = c**2 - v_cx**2 - v_cy**2
+    v_cz = math.sqrt(max(0.0, term_cz))
+    
+    # המרה לקרטזיות
+    cx = x * v_ax + y * v_bx + z * v_cx
+    cy = x * v_ay + y * v_by + z * v_cy
+    cz = x * v_az + y * v_bz + z * v_cz
+    
+    return cx, cy, cz
+
+# ==========================================
 # 1. מנוע הליבה: אבחון מתקדם, הגנה ובדיקות שפיות
 # ==========================================
 
@@ -34,8 +76,18 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
     fixed_lines = []
     has_p1 = False
     has_cell_params = False
+    cell = {'a': 5.0, 'b': 5.0, 'c': 5.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0}
     atoms = []
     duplicate_atoms_found = False
+
+    # שלב א': חילוץ פרמטרי תא יחידה
+    for param in ['a', 'b', 'c', 'alpha', 'beta', 'gamma']:
+        match = re.search(rf"_cell_length_{param}\s+([0-9\.]+)", content, re.IGNORECASE) or \
+                re.search(rf"_cell_angle_{param}\s+([0-9\.]+)", content, re.IGNORECASE)
+        if match:
+            cell[param] = float(match.group(1))
+            if param in ['a', 'b', 'c']:
+                has_cell_params = True
 
     for line_idx, line in enumerate(lines, 1):
         stripped = line.strip()
@@ -50,11 +102,6 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
                     "message": f"Line {line_idx}: Detected P1 symmetry trap (Low symmetry). Causes exponential grid inflation in DFT."
                 })
                 audit_trail.append(f"Flagged P1 symmetry declaration at line {line_idx}.")
-        
-        # זיהוי פרמטרי תא
-        if "_cell_length_a" in stripped:
-            has_cell_params = True
-            audit_trail.append("Confirmed presence of primary cell parameter (_cell_length_a).")
 
         # איסוף קואורדינציות אטומים לבדיקת התנגשויות
         if stripped and not stripped.startswith("#") and not stripped.startswith("_") and not stripped.startswith("data_") and not stripped.startswith("loop_"):
@@ -62,7 +109,8 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
             if parts and len(parts) >= 4:
                 label = parts[0]
                 try:
-                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                    # הנחה תקנית ב-CIF: קואורדינטות פמוריות (fract_x, fract_y, fract_z)
+                    fx, fy, fz = float(parts[1]), float(parts[2]), float(parts[3])
                     
                     if any(a[0] == label for a in atoms):
                         duplicate_atoms_found = True
@@ -72,17 +120,20 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
                             "message": f"Line {line_idx}: Duplicate atom label '{label}' detected."
                         })
                     
+                    # המרה לקרטזיות לצורך חישוב מרחקים מדויק
+                    cx, cy, cz = fractional_to_cartesian(fx, fy, fz, cell)
+                    
                     # חילוץ סמל האלמנט מתוך הלייבל (למשל Si1 -> Si, C12 -> C)
                     elem_match = re.match(r"([A-Za-z]{1,2})", label)
                     symbol = elem_match.group(1) if elem_match else "C"
                     
-                    atoms.append((label, symbol, x, y, z, line_idx))
+                    atoms.append((label, symbol, cx, cy, cz, line_idx))
                 except ValueError:
                     pass
 
         fixed_lines.append(line)
 
-    # בדיקת התנגשויות אטומים מרחבית לפי רדיוסים קוולנטיים דינמיים
+    # בדיקת התנגשויות אטומים מרחבית בקואורדינטות קרטזיות אמיתיות
     for i in range(len(atoms)):
         for j in range(i + 1, len(atoms)):
             l1, sym1, x1, y1, z1, idx1 = atoms[i]
@@ -116,7 +167,7 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
         audit_trail.append("Warning: Duplicate atom sites recorded in atomic coordinate list.")
 
     fixed_content = "\n".join(fixed_lines)
-    audit_trail.append("Parsing and diagnostic scan completed successfully under 'Do No Harm' policy.")
+    audit_trail.append("Parsing, Cartesian transformation, and diagnostic scan completed successfully.")
     
     return fixed_content, issues, audit_trail
 
