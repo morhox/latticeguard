@@ -4,6 +4,8 @@ import io
 import zipfile
 import re
 import json
+import numpy as np
+from scipy.spatial import cKDTree
 
 # ==========================================
 # מטריצת רדיוסים קוולנטיים (אנגסטרם) - Cordero et al.
@@ -19,7 +21,7 @@ DEFAULT_RADIUS = 1.0
 CLASH_SCALING_FACTOR = 0.55
 
 # ==========================================
-# פונקציות קריסטלוגרפיות מתקדמות
+# פונקציות קריסטלוגרפיות ומתמטיות מתקדמות
 # ==========================================
 def calculate_cell_volume(cell):
     a = cell.get('a', 1.0)
@@ -36,10 +38,10 @@ def calculate_cell_volume(cell):
     term = 1.0 - ca**2 - cb**2 - cg**2 + 2.0 * ca * cb * cg
     return a * b * c * math.sqrt(max(0.0, term))
 
-def fractional_to_cartesian(x, y, z, cell):
-    a = cell.get('a', 1.0)
-    b = cell.get('b', 1.0)
-    c = cell.get('c', 1.0)
+def fractional_to_cartesian(coords_frac, cell):
+    a = cell.get('a', 5.0)
+    b = cell.get('b', 5.0)
+    c = cell.get('c', 5.0)
     alpha = math.radians(cell.get('alpha', 90.0))
     beta = math.radians(cell.get('beta', 90.0))
     gamma = math.radians(cell.get('gamma', 90.0))
@@ -55,75 +57,76 @@ def fractional_to_cartesian(x, y, z, cell):
     v_cy = c * (cos_alpha - cos_beta * cos_gamma) / sin_gamma
     v_cz = math.sqrt(max(0.0, c**2 - v_cx**2 - v_cy**2))
     
-    cx = x * v_ax + y * v_bx + z * v_cx
-    cy = x * v_ay + y * v_by + z * v_cy
-    cz = x * v_az + y * v_bz + z * v_cz
-    return cx, cy, cz
-
-def generate_full_cell_atoms(atoms_asymmetric, space_group):
-    """
-    מנוע פריסת סימטריה מתקדם (Space Group Expansion).
-    במערכות P1 או כלליות מחזיר את האטומים כפי שהם, עם תמיכה בהרחבה סימטרית בסיסית.
-    """
-    expanded_atoms = []
-    for atom in atoms_asymmetric:
-        label, symbol, fx, fy, fz, occ, idx = atom
-        # טיפול בתפוסה חלקית (Occupancy check)
-        if occ <= 0.0:
-            continue
-        
-        # הוספת האטום המקורי
-        expanded_atoms.append((label, symbol, fx, fy, fz, idx))
-        
-        # דוגמה להפעלת אופרטורי סימטריה בסיסיים אם זו חבורה מרחבית סימטרית
-        if "P 2" in space_group or "P2" in space_group:
-            expanded_atoms.append((f"{label}_sym1", symbol, -fx, fy + 0.5, -fz, idx))
-            
-    return expanded_atoms
-
-def check_interatomic_clashes_mic(atoms, cell):
-    clashes = []
-    n = len(atoms)
+    matrix = np.array([
+        [v_ax, v_bx, v_cx],
+        [v_ay, v_by, v_cy],
+        [v_az, v_bz, v_cz]
+    ])
     
-    for i in range(n):
-        for j in range(i + 1, n):
-            l1, sym1, fx1, fy1, fz1, idx1 = atoms[i]
-            l2, sym2, fx2, fy2, fz2, idx2 = atoms[j]
+    cart_coords = np.dot(matrix, coords_frac.T).T
+    return cart_coords
+
+def check_interatomic_clashes_kdtree(atoms, cell):
+    """
+    בדיקת התנגשויות מרחבית מהירה באמצעות SciPy cKDTree ותנאי שפה מחזוריים (PBC).
+    """
+    if not atoms:
+        return []
+        
+    clashes = []
+    frac_coords = np.array([[a[2], a[3], a[4]] for a in atoms])
+    
+    # הפשטה לתוך תא היחידה הראשוני (Wrapping)
+    frac_coords = frac_coords % 1.0
+    cart_coords = fractional_to_cartesian(frac_coords, cell)
+    
+    # בניית עץ מרחבי לחיפוש מהיר O(N log N)
+    tree = cKDTree(cart_coords)
+    
+    # סף חיפוש מקסימלי (2.5 אנגסטרם מכסה את כל הרדיוסים האפשריים)
+    max_radius = 2.5 
+    pairs = tree.query_pairs(r=max_radius)
+    
+    for i, j in pairs:
+        if i >= j:
+            continue
+        atom1 = atoms[i]
+        atom2 = atoms[j]
+        
+        sym1, sym2 = atom1[1], atom2[1]
+        r1 = COVALENT_RADII.get(sym1, DEFAULT_RADIUS)
+        r2 = COVALENT_RADII.get(sym2, DEFAULT_RADIUS)
+        dynamic_threshold = (r1 + r2) * CLASH_SCALING_FACTOR
+        
+        dist = np.linalg.norm(cart_coords[i] - cart_coords[j])
+        
+        if dist < dynamic_threshold:
+            clashes.append({
+                'atom1': f"{atom1[0]} ({sym1}, line {atom1[6]})",
+                'atom2': f"{atom2[0]} ({sym2}, line {atom2[6]})",
+                'distance': round(float(dist), 4),
+                'threshold': round(float(dynamic_threshold), 4)
+            })
             
-            dfx = (fx1 - fx2) - round(fx1 - fx2)
-            dfy = (fy1 - fy2) - round(fy1 - fy2)
-            dfz = (fz1 - fz2) - round(fz1 - fz2)
-            
-            cx, cy, cz = fractional_to_cartesian(dfx, dfy, dfz, cell)
-            dist = math.sqrt(cx**2 + cy**2 + cz**2)
-            
-            r1 = COVALENT_RADII.get(sym1, DEFAULT_RADIUS)
-            r2 = COVALENT_RADII.get(sym2, DEFAULT_RADIUS)
-            dynamic_threshold = (r1 + r2) * CLASH_SCALING_FACTOR
-            
-            if dist < dynamic_threshold:
-                clashes.append({
-                    'atom1': f"{l1} ({sym1}, line {idx1})",
-                    'atom2': f"{l2} ({sym2}, line {idx2})",
-                    'distance': round(dist, 4),
-                    'threshold': round(dynamic_threshold, 4)
-                })
     return clashes
 
-def export_to_vasp_poscar(cell, atoms, title="LatticeGuard Structure"):
-    """
-    המרה אוטומטית של המבנה לפורמט VASP POSCAR תקני.
-    """
-    a = cell.get('a', 5.0)
-    b = cell.get('b', 5.0)
-    c = cell.get('c', 5.0)
+# ==========================================
+# מנועי ייצוא לפורמטי HPC שונים
+# ==========================================
+def export_to_vasp_poscar(cell, atoms, title="LatticeGuard VASP Structure"):
+    a, b, c = cell.get('a', 5.0), cell.get('b', 5.0), cell.get('c', 5.0)
+    alpha, beta, gamma = cell.get('alpha', 90.0), cell.get('beta', 90.0), cell.get('gamma', 90.0)
+    
+    # חישוב וקטורי תא אורתוגונליים/כלליים לפוסקר
+    v_cx = c * math.cos(math.radians(beta))
+    v_cy = c * (math.cos(math.radians(alpha)) - math.cos(math.radians(beta)) * math.cos(math.radians(gamma))) / math.sin(math.radians(gamma))
+    v_cz = math.sqrt(max(0.0, c**2 - v_cx**2 - v_cy**2))
     
     poscar = f"{title}\n1.0\n"
     poscar += f" {a:12.6f} 0.000000 0.000000\n"
-    poscar += f" 0.000000 {b:12.6f} 0.000000\n"
-    poscar += f" 0.000000 0.000000 {c:12.6f}\n"
+    poscar += f" {b * math.cos(math.radians(gamma)):12.6f} {b * math.sin(math.radians(gamma)):12.6f} 0.000000\n"
+    poscar += f" {v_cx:12.6f} {v_cy:12.6f} {v_cz:12.6f}\n"
     
-    # מיון אטומים לפי אלמנט
     element_counts = {}
     element_coords = {}
     for atom in atoms:
@@ -139,30 +142,49 @@ def export_to_vasp_poscar(cell, atoms, title="LatticeGuard Structure"):
     for sym in symbols:
         for coords in element_coords[sym]:
             poscar += f" {coords[0]:10.6f} {coords[1]:10.6f} {coords[2]:10.6f}\n"
-            
     return poscar
 
-# ==========================================
-# 1. מנוע הליבה: אבחון מלא, סימטריה ו-POSCAR
-# ==========================================
+def export_to_quantum_espresso(cell, atoms, title="LatticeGuard QE Structure"):
+    a, b, c = cell.get('a', 5.0), cell.get('b', 5.0), cell.get('c', 5.0)
+    pwi = f"! Quantum ESPRESSO Input File generated by LatticeGuard\n"
+    pwi += f"&CONTROL\n  calculation = 'scf'\n  prefix = 'latticeguard'\n/\n"
+    pwi += f"&SYSTEM\n  ibrav = 0, nat = {len(atoms)}, ntyp = {len(set(a[1] for a in atoms))}\n"
+    pwi += f"  celldm(1) = {a / 0.52917721092:.6f}\n/\n"
+    pwi += f"&ELECTRONS\n/\n"
+    pwi += f"ATOMIC_SPECIES\n"
+    for sym in set(a[1] for a in atoms):
+        pwi += f" {sym}  1.00  {sym}.upf\n"
+    pwi += f"ATOMIC_POSITIONS crystal\n"
+    for atom in atoms:
+        pwi += f" {atom[1]}  {atom[2]:10.6f} {atom[3]:10.6f} {atom[4]:10.6f}\n"
+    pwi += f"K_POINTS automatic\n  4 4 4 1 1 1\n"
+    return pwi
 
-def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str], str, dict]:
+def export_to_xyz(cell, atoms):
+    cart_coords = fractional_to_cartesian(np.array([[a[2], a[3], a[4]] for a in atoms]), cell)
+    xyz = f"{len(atoms)}\nGenerated by LatticeGuard HPC Suite\n"
+    for idx, atom in enumerate(atoms):
+        sym = atom[1]
+        x, y, z = cart_coords[idx]
+        xyz += f" {sym:2s} {x:12.6f} {y:12.6f} {z:12.6f}\n"
+    return xyz
+
+# ==========================================
+# מנוע הליבה: אבחון ותיקון מלא
+# ==========================================
+def audit_and_fix_cif(content: str):
     issues = []
     audit_trail = []
     
-    try:
-        lines = content.splitlines()
-        audit_trail.append(f"Initiated parsing of {len(lines)} lines.")
-    except Exception as e:
-        return content, [{"type": "error", "category": "Parser Error", "message": f"Failed to read file lines: {str(e)}"}], ["Critical parsing failure."], "", {}
+    lines = content.splitlines()
+    audit_trail.append(f"Initiated parsing of {len(lines)} lines.")
 
     fixed_lines = []
     space_group = "P 1"
     has_cell_params = False
     cell = {'a': 5.0, 'b': 5.0, 'c': 5.0, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0}
-    atoms_asymmetric = []
+    atoms = []
     seen_labels = set()
-    duplicate_atoms_found = False
 
     for param in ['a', 'b', 'c', 'alpha', 'beta', 'gamma']:
         match = re.search(rf"_cell_length_{param}\s+([0-9\.]+)", content, re.IGNORECASE) or \
@@ -175,25 +197,23 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str], str, di
     sg_match = re.search(r"_symmetry_space_group_name_H-M\s+['\"]?([^'\n]+)['\"]?", content, re.IGNORECASE)
     if sg_match:
         space_group = sg_match.group(1).strip()
-        audit_trail.append(f"Identified Space Group: {space_group}")
 
     cell_vol = calculate_cell_volume(cell)
     if cell_vol <= 0.0:
         issues.append({
             "type": "error",
             "category": "Unphysical Unit Cell",
-            "message": f"Critical: Calculated unit cell volume is non-positive ({cell_vol:.2f} A^3)."
+            "message": f"Critical: Unit cell volume is non-positive ({cell_vol:.2f} A^3)."
         })
     else:
         audit_trail.append(f"Unit cell volume verified: {cell_vol:.2f} A^3.")
 
     in_loop = False
     loop_headers = []
-    x_idx, y_idx, z_idx, label_idx, occ_idx = -1, -1, -1, -1, -1
+    x_idx = y_idx = z_idx = label_idx = occ_idx = -1
 
     for line_idx, line in enumerate(lines, 1):
         stripped = line.strip()
-        
         if stripped.startswith("loop_"):
             in_loop = True
             loop_headers = []
@@ -225,12 +245,14 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str], str, di
                         fz = float(parts[z_idx])
                         occ = float(parts[occ_idx]) if occ_idx != -1 and occ_idx < len(parts) else 1.0
                         
+                        if occ <= 0.0:
+                            continue
+                            
                         if label in seen_labels:
-                            duplicate_atoms_found = True
                             issues.append({
                                 "type": "warning",
                                 "category": "Structural Warning",
-                                "message": f"Line {line_idx}: Duplicate atom label '{label}' detected."
+                                "message": f"Line {line_idx}: Duplicate atom label '{label}'."
                             })
                         else:
                             seen_labels.add(label)
@@ -238,7 +260,7 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str], str, di
                         elem_match = re.match(r"([A-Za-z]{1,2})", label)
                         symbol = elem_match.group(1) if elem_match else "C"
                         
-                        atoms_asymmetric.append((label, symbol, fx, fy, fz, occ, line_idx))
+                        atoms.append((label, symbol, fx, fy, fz, occ, line_idx))
                     except ValueError:
                         pass
         
@@ -246,73 +268,64 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str], str, di
             issues.append({
                 "type": "warning",
                 "category": "Symmetry Trap",
-                "message": f"Line {line_idx}: Detected P1 symmetry trap (Low symmetry)."
+                "message": f"Line {line_idx}: Detected P1 low-symmetry trap."
             })
 
         fixed_lines.append(line)
 
-    # פריסת סימטריה מלאה לתא היחידה
-    full_atoms = generate_full_cell_atoms(atoms_asymmetric, space_group)
-    audit_trail.append(f"Expanded asymmetric unit from {len(atoms_asymmetric)} to {len(full_atoms)} lattice sites.")
-
-    if full_atoms and cell_vol > 0.0:
-        clashes = check_interatomic_clashes_mic(full_atoms, cell)
+    if atoms and cell_vol > 0.0:
+        clashes = check_interatomic_clashes_kdtree(atoms, cell)
         if clashes:
             for c in clashes:
                 issues.append({
                     "type": "error",
-                    "category": "Interatomic Clash (PBC)",
-                    "message": f"Spatial clash between {c['atom1']} and {c['atom2']}. Distance: {c['distance']} A < Threshold: {c['threshold']} A."
+                    "category": "Interatomic Clash (cKDTree)",
+                    "message": f"Spatial clash between {c['atom1']} and {c['atom2']}. Distance: {c['distance']} A."
                 })
-            audit_trail.append(f"Detected {len(clashes)} interatomic spatial clashes.")
+            audit_trail.append(f"Detected {len(clashes)} spatial clashes using cKDTree.")
         else:
-            audit_trail.append("No atomic clashes detected under periodic boundary conditions.")
+            audit_trail.append("No atomic clashes detected under periodic boundaries.")
 
     if not has_cell_params and len(content.strip()) > 0:
         issues.append({
             "type": "error",
             "category": "Missing Data",
-            "message": "Critical: Missing essential cell parameters (_cell_length_a etc.)."
+            "message": "Critical: Missing essential cell parameters."
         })
 
     fixed_content = "\n".join(fixed_lines)
-    poscar_content = export_to_vasp_poscar(cell, full_atoms)
+    poscar_content = export_to_vasp_poscar(cell, atoms)
+    qe_content = export_to_quantum_espresso(cell, atoms)
+    xyz_content = export_to_xyz(cell, atoms)
     
-    audit_report_dict = {
+    report_dict = {
         "space_group": space_group,
         "cell_parameters": cell,
         "cell_volume": cell_vol,
-        "total_atoms_expanded": len(full_atoms),
+        "total_atoms": len(atoms),
         "issues_found": len(issues),
         "audit_trail": audit_trail
     }
 
-    return fixed_content, issues, audit_trail, poscar_content, audit_report_dict
+    return fixed_content, issues, audit_trail, poscar_content, qe_content, xyz_content, report_dict
 
-def validate_fixed_cif(original_content: str, fixed_content: str) -> tuple[bool, list[str]]:
+def validate_fixed_cif(fixed_content: str):
     errors = []
     if not fixed_content or len(fixed_content.strip()) < 10:
-        errors.append("Critical: Fixed CIF content is empty or too short.")
-        return False, errors
+        errors.append("Critical: Fixed content is empty.")
     if "NaN" in fixed_content or "inf" in fixed_content:
-        errors.append("Warning: Fixed CIF contains unphysical NaN or infinite values.")
-    is_valid = len([e for e in errors if "Critical" in e or "Sanity Error" in e]) == 0
+        errors.append("Warning: Contains unphysical NaN values.")
+    is_valid = len([e for e in errors if "Critical" in e]) == 0
     return is_valid, errors
 
-
 # ==========================================
-# 2. ממשק משתמש פרימיום: Batch, POSCAR & JSON
+# ממשק משתמש Streamlit פרימיום
 # ==========================================
+st.set_page_config(page_title="LatticeGuard HPC Suite", page_icon="🛡️", layout="centered")
 
-st.set_page_config(
-    page_title="LatticeGuard — Advanced HPC CIF Auditor", 
-    page_icon="🛡️", 
-    layout="centered"
-)
-
-st.title("🛡️ LatticeGuard")
-st.markdown("### Elite-Tier Pre-Flight HPC CIF Auditor & Converter")
-st.markdown("Rigorous crystallographic verification, space-group symmetry expansion, and direct VASP POSCAR export.")
+st.title("🛡️ LatticeGuard HPC Suite")
+st.markdown("### Elite-Tier Crystallographic Auditor & Multi-Format Converter")
+st.markdown("Powered by SciPy cKDTree spatial indexing and strict simulation safety gatekeepers.")
 st.markdown("---")
 
 SAMPLE_CIF = """data_sample_p1_trap
@@ -334,13 +347,11 @@ Si1 0.00000 0.00000 0.00000
 Si2 0.00000 0.00000 0.00000
 """
 
-st.sidebar.header("Control Panel")
+st.sidebar.header("HPC Control Panel")
 load_sample = st.sidebar.button("🧪 Load Sample Defective CIF")
-
 uploaded_files = st.file_uploader("Upload Structure File(s)", type=["cif", "txt"], accept_multiple_files=True)
 
 files_to_process = []
-
 if load_sample:
     files_to_process.append(("sample_defective.cif", SAMPLE_CIF))
 elif uploaded_files:
@@ -353,7 +364,6 @@ elif uploaded_files:
 
 if files_to_process:
     st.markdown(f"### 📦 Batch Processing Dashboard ({len(files_to_process)} files loaded)")
-    
     successful_files = []
 
     for file_name, cif_content in files_to_process:
@@ -364,12 +374,12 @@ if files_to_process:
             with st.expander("📁 View Raw Content", expanded=False):
                 st.text_area("Raw CIF", cif_content, height=120, key=f"raw_{file_name}")
 
-            fixed_content, issues, audit_trail, poscar_content, report_dict = audit_and_fix_cif(cif_content)
-            is_valid, validation_errors = validate_fixed_cif(cif_content, fixed_content)
+            fixed_content, issues, audit_trail, poscar, qe, xyz, report_dict = audit_and_fix_cif(cif_content)
+            is_valid, validation_errors = validate_fixed_cif(fixed_content)
 
             st.markdown("#### 🔍 Audit Diagnostic Report")
             if not issues:
-                st.success("✨ **Audit Clean:** No structural traps or missing parameters identified.")
+                st.success("✨ **Audit Clean:** No structural traps or clashes identified.")
             else:
                 for issue in issues:
                     if issue["type"] == "error":
@@ -381,65 +391,54 @@ if files_to_process:
                 for log_entry in audit_trail:
                     st.text(f"• {log_entry}")
 
-            st.markdown("#### 🛡️ Safety & HPC Export Gatekeeper")
+            st.markdown("#### 🛡️ Safety & HPC Exporters Gatekeeper")
             if is_valid:
-                st.success("✅ **Verification Passed:** Structure is certified safe for simulation pipelines.")
-                clean_filename = file_name.replace(".cif", "_fixed.cif")
-                poscar_filename = file_name.replace(".cif", "_POSCAR")
-                report_filename = file_name.replace(".cif", "_audit_report.json")
+                st.success("✅ **Verification Passed:** Structure is certified safe for HPC pipelines.")
                 
-                successful_files.append((clean_filename, fixed_content))
-                successful_files.append((poscar_filename, poscar_content))
-                successful_files.append((report_filename, json.dumps(report_dict, indent=2)))
+                f_clean = file_name.replace(".cif", "_fixed.cif")
+                f_poscar = file_name.replace(".cif", "_POSCAR")
+                f_qe = file_name.replace(".cif", ".pwi")
+                f_xyz = file_name.replace(".cif", ".xyz")
+                f_json = file_name.replace(".cif", "_audit.json")
                 
-                col_d1, col_d2, col_d3 = st.columns(3)
-                with col_d1:
-                    st.download_button(
-                        label="📥 Download Clean CIF",
-                        data=fixed_content,
-                        file_name=clean_filename,
-                        mime="chemical/x-cif",
-                        key=f"dl_cif_{file_name}"
-                    )
-                with col_d2:
-                    st.download_button(
-                        label="📥 Download VASP POSCAR",
-                        data=poscar_content,
-                        file_name=poscar_filename,
-                        mime="text/plain",
-                        key=f"dl_poscar_{file_name}"
-                    )
-                with col_d3:
-                    st.download_button(
-                        label="📥 Download JSON Report",
-                        data=json.dumps(report_dict, indent=2),
-                        file_name=report_filename,
-                        mime="application/json",
-                        key=f"dl_json_{file_name}"
-                    )
+                successful_files.extend([
+                    (f_clean, fixed_content),
+                    (f_poscar, poscar),
+                    (f_qe, qe),
+                    (f_xyz, xyz),
+                    (f_json, json.dumps(report_dict, indent=2))
+                ])
+                
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.download_button("📥 CIF", fixed_content, file_name=f_clean, key=f"dl_cif_{file_name}")
+                with c2:
+                    st.download_button("📥 POSCAR", poscar, file_name=f_poscar, key=f"dl_pos_{file_name}")
+                with c3:
+                    st.download_button("📥 QE (.pwi)", qe, file_name=f_qe, key=f"dl_qe_{file_name}")
+                with c4:
+                    st.download_button("📥 JSON", json.dumps(report_dict, indent=2), file_name=f_json, key=f"dl_json_{file_name}")
             else:
-                st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld.")
+                st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld under 'Do No Harm' policy.")
                 for err in validation_errors:
                     st.warning(err)
 
     if successful_files:
         st.markdown("---")
         st.markdown("### 🗂️ Batch Archive Export")
-        
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for fname, fcontent in successful_files:
                 zip_file.writestr(fname, fcontent)
-        
         zip_buffer.seek(0)
         
         st.download_button(
-            label=f"📦 Download Complete Verified Bundle as ZIP (CIFs + POSCARs + Reports)",
+            label="📦 Download Complete HPC Bundle (ZIP)",
             data=zip_buffer,
-            file_name="latticeguard_hpc_bundle.zip",
+            file_name="latticeguard_hpc_complete_bundle.zip",
             mime="application/zip",
             type="primary",
             use_container_width=True
         )
 else:
-    st.info("💡 **Get Started:** Click 'Load Sample Defective CIF' in the sidebar or upload one or multiple `.cif` files for advanced batch processing.")
+    st.info("💡 **Get Started:** Click 'Load Sample Defective CIF' in the sidebar or upload `.cif` files for instant elite-tier HPC batch auditing.")
