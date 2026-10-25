@@ -62,13 +62,9 @@ def fractional_to_cartesian(coords_frac, cell):
         [v_az, v_bz, v_cz]
     ])
     
-    cart_coords = np.dot(matrix, coords_frac.T).T
-    return cart_coords
+    return np.dot(matrix, coords_frac.T).T
 
 def check_interatomic_clashes_vectorized(atoms, cell):
-    """
-    בדיקת התנגשויות מרחבית מהירה ומדויקת באמצעות מטריצות NumPy תחת תנאי שפה מחזוריים (PBC).
-    """
     if not atoms:
         return []
         
@@ -77,7 +73,6 @@ def check_interatomic_clashes_vectorized(atoms, cell):
     frac_coords = np.array([[a[2], a[3], a[4]] for a in atoms]) % 1.0
     cart_coords = fractional_to_cartesian(frac_coords, cell)
     
-    # חישוב מטריצת מרחקים וקטורית מהירה במיוחד
     cart_diff = cart_coords[:, np.newaxis, :] - cart_coords[np.newaxis, :, :]
     dist_matrix = np.linalg.norm(cart_diff, axis=-1)
     
@@ -92,7 +87,6 @@ def check_interatomic_clashes_vectorized(atoms, cell):
             dynamic_threshold = (r1 + r2) * CLASH_SCALING_FACTOR
             
             dist = dist_matrix[i, j]
-            
             if dist < dynamic_threshold:
                 clashes.append({
                     'atom1': f"{atom1[0]} ({sym1}, line {atom1[6]})",
@@ -100,7 +94,6 @@ def check_interatomic_clashes_vectorized(atoms, cell):
                     'distance': round(float(dist), 4),
                     'threshold': round(float(dynamic_threshold), 4)
                 })
-            
     return clashes
 
 # ==========================================
@@ -108,7 +101,6 @@ def check_interatomic_clashes_vectorized(atoms, cell):
 # ==========================================
 def export_to_vasp_poscar(cell, atoms, title="LatticeGuard VASP Structure"):
     a, b, c = cell.get('a', 5.0), cell.get('b', 5.0), cell.get('c', 5.0)
-    
     v_cx = c * math.cos(math.radians(cell.get('beta', 90.0)))
     v_cy = c * (math.cos(math.radians(cell.get('alpha', 90.0))) - math.cos(math.radians(cell.get('beta', 90.0))) * math.cos(math.radians(cell.get('gamma', 90.0)))) / math.sin(math.radians(cell.get('gamma', 90.0)))
     v_cz = math.sqrt(max(0.0, c**2 - v_cx**2 - v_cy**2))
@@ -310,13 +302,40 @@ def validate_fixed_cif(fixed_content: str):
     return is_valid, errors
 
 # ==========================================
-# ממשק משתמש Streamlit פרימיום
+# ממשק משתמש פרימיום מעוצב (Elite UX)
 # ==========================================
-st.set_page_config(page_title="LatticeGuard HPC Suite", page_icon="🛡️", layout="centered")
+st.set_page_config(
+    page_title="LatticeGuard HPC Suite", 
+    page_icon="🛡️", 
+    layout="wide"
+)
 
-st.title("🛡️ LatticeGuard HPC Suite")
-st.markdown("### Elite-Tier Crystallographic Auditor & Multi-Format Converter")
-st.markdown("Powered by vectorized NumPy spatial acceleration and strict simulation safety gatekeepers.")
+# Custom Styling for Maximum UX Polish
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.25rem;
+        font-weight: 700;
+        color: #0f172a;
+        margin-bottom: 0px;
+    }
+    .sub-header {
+        font-size: 1.1rem;
+        color: #475569;
+        margin-bottom: 20px;
+    }
+    .card {
+        background-color: #f8fafc;
+        border: 1px solid #e2e8f0;
+        padding: 20px;
+        border-radius: 12px;
+        margin-bottom: 15px;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+st.markdown('<p class="main-header">🛡️ LatticeGuard HPC Suite</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Elite-Tier Crystallographic Auditor & Multi-Format Simulation Gatekeeper</p>', unsafe_allow_html=True)
 st.markdown("---")
 
 SAMPLE_CIF = """data_sample_p1_trap
@@ -338,9 +357,13 @@ Si1 0.00000 0.00000 0.00000
 Si2 0.00000 0.00000 0.00000
 """
 
-st.sidebar.header("HPC Control Panel")
-load_sample = st.sidebar.button("🧪 Load Sample Defective CIF")
-uploaded_files = st.file_uploader("Upload Structure File(s)", type=["cif", "txt"], accept_multiple_files=True)
+with st.sidebar:
+    st.header("⚙️ HPC Control Panel")
+    load_sample = st.button("🧪 Load Sample Defective CIF", use_container_width=True)
+    st.markdown("---")
+    uploaded_files = st.file_uploader("Upload Structure Files", type=["cif", "txt"], accept_multiple_files=True)
+    st.markdown("### 🛡️ Safety Policy")
+    st.info("Files failing structural safety checks are strictly blocked from export to prevent HPC core-hour waste.")
 
 files_to_process = []
 if load_sample:
@@ -354,68 +377,91 @@ elif uploaded_files:
             st.error(f"Failed to read file {f.name}: {e}")
 
 if files_to_process:
-    st.markdown(f"### 📦 Batch Processing Dashboard ({len(files_to_process)} files loaded)")
+    st.markdown(f"### 📊 Batch Processing Dashboard ({len(files_to_process)} files loaded)")
+    
     successful_files = []
+    passed_count = 0
+    failed_count = 0
 
+    # Pre-calculate statuses for high-level metrics
+    results_cache = []
     for file_name, cif_content in files_to_process:
+        fixed_content, issues, audit_trail, poscar, qe, xyz, report_dict = audit_and_fix_cif(cif_content)
+        is_valid, validation_errors = validate_fixed_cif(fixed_content)
+        if is_valid:
+            passed_count += 1
+        else:
+            failed_count += 1
+        results_cache.append((file_name, cif_content, fixed_content, issues, audit_trail, poscar, qe, xyz, report_dict, is_valid, validation_errors))
+
+    # Top-Level Metrics Row for Maximum UX
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Files", len(files_to_process))
+    m2.metric("Passed (Certified Safe)", passed_count, delta=f"{passed_count} ready")
+    m3.metric("Blocked (Failed Checks)", failed_count, delta=f"-{failed_count}" if failed_count > 0 else "0", delta_color="inverse")
+    st.markdown("---")
+
+    for idx, res in enumerate(results_cache):
+        file_name, cif_content, fixed_content, issues, audit_trail, poscar, qe, xyz, report_dict, is_valid, validation_errors = res
+        
+        status_icon = "🟢" if is_valid else "🔴"
         with st.container():
-            st.markdown(f"---")
-            st.subheader(f"📄 File: `{file_name}`")
+            st.markdown(f"#### {status_icon} File: `{file_name}`")
             
-            with st.expander("📁 View Raw Content", expanded=False):
-                st.text_area("Raw CIF", cif_content, height=120, key=f"raw_{file_name}")
-
-            fixed_content, issues, audit_trail, poscar, qe, xyz, report_dict = audit_and_fix_cif(cif_content)
-            is_valid, validation_errors = validate_fixed_cif(fixed_content)
-
-            st.markdown("#### 🔍 Audit Diagnostic Report")
-            if not issues:
-                st.success("✨ **Audit Clean:** No structural traps or clashes identified.")
-            else:
-                for issue in issues:
-                    if issue["type"] == "error":
-                        st.error(f"❌ **[{issue['category']}]** {issue['message']}")
-                    else:
-                        st.warning(f"⚠️ **[{issue['category']}]** {issue['message']}")
-
-            with st.expander("📋 View Execution Audit Trail", expanded=False):
+            # Using Tabs for Maximum UX Clarity
+            tab_audit, tab_raw, tab_logs, tab_export = st.tabs(["🔍 Audit Report", "📁 Raw Content", "📋 Audit Trail", "📥 HPC Exports"])
+            
+            with tab_audit:
+                if not issues:
+                    st.success("✨ **Audit Clean:** No structural traps or clashes identified.")
+                else:
+                    for issue in issues:
+                        if issue["type"] == "error":
+                            st.error(f"❌ **[{issue['category']}]** {issue['message']}")
+                        else:
+                            st.warning(f"⚠️ **[{issue['category']}]** {issue['message']}")
+            
+            with tab_raw:
+                st.text_area("Original CIF Content", cif_content, height=140, key=f"raw_{file_name}_{idx}")
+                
+            with tab_logs:
                 for log_entry in audit_trail:
                     st.text(f"• {log_entry}")
-
-            st.markdown("#### 🛡️ Safety & HPC Exporters Gatekeeper")
-            if is_valid:
-                st.success("✅ **Verification Passed:** Structure is certified safe for HPC pipelines.")
-                
-                f_clean = file_name.replace(".cif", "_fixed.cif")
-                f_poscar = file_name.replace(".cif", "_POSCAR")
-                f_qe = file_name.replace(".cif", ".pwi")
-                f_xyz = file_name.replace(".cif", ".xyz")
-                f_json = file_name.replace(".cif", "_audit.json")
-                
-                successful_files.extend([
-                    (f_clean, fixed_content),
-                    (f_poscar, poscar),
-                    (f_qe, qe),
-                    (f_xyz, xyz),
-                    (f_json, json.dumps(report_dict, indent=2))
-                ])
-                
-                c1, c2, c3, c4 = st.columns(4)
-                with c1:
-                    st.download_button("📥 CIF", fixed_content, file_name=f_clean, key=f"dl_cif_{file_name}")
-                with c2:
-                    st.download_button("📥 POSCAR", poscar, file_name=f_poscar, key=f"dl_pos_{file_name}")
-                with c3:
-                    st.download_button("📥 QE (.pwi)", qe, file_name=f_qe, key=f"dl_qe_{file_name}")
-                with c4:
-                    st.download_button("📥 JSON", json.dumps(report_dict, indent=2), file_name=f_json, key=f"dl_json_{file_name}")
-            else:
-                st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld under 'Do No Harm' policy.")
-                for err in validation_errors:
-                    st.warning(err)
+                    
+            with tab_export:
+                if is_valid:
+                    st.success("✅ **Verification Passed:** Structure is certified safe for HPC pipelines.")
+                    
+                    f_clean = file_name.replace(".cif", "_fixed.cif")
+                    f_poscar = file_name.replace(".cif", "_POSCAR")
+                    f_qe = file_name.replace(".cif", ".pwi")
+                    f_xyz = file_name.replace(".cif", ".xyz")
+                    f_json = file_name.replace(".cif", "_audit.json")
+                    
+                    successful_files.extend([
+                        (f_clean, fixed_content),
+                        (f_poscar, poscar),
+                        (f_qe, qe),
+                        (f_xyz, xyz),
+                        (f_json, json.dumps(report_dict, indent=2))
+                    ])
+                    
+                    c1, c2, c3, c4 = st.columns(4)
+                    with c1:
+                        st.download_button("📥 CIF", fixed_content, file_name=f_clean, key=f"dl_cif_{file_name}_{idx}")
+                    with c2:
+                        st.download_button("📥 POSCAR", poscar, file_name=f_poscar, key=f"dl_pos_{file_name}_{idx}")
+                    with c3:
+                        st.download_button("📥 QE (.pwi)", qe, file_name=f_qe, key=f"dl_qe_{file_name}_{idx}")
+                    with c4:
+                        st.download_button("📥 JSON", json.dumps(report_dict, indent=2), file_name=f_json, key=f"dl_json_{file_name}_{idx}")
+                else:
+                    st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld under 'Do No Harm' policy.")
+                    for err in validation_errors:
+                        st.warning(err)
+            st.markdown("---")
 
     if successful_files:
-        st.markdown("---")
         st.markdown("### 🗂️ Batch Archive Export")
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -424,7 +470,7 @@ if files_to_process:
         zip_buffer.seek(0)
         
         st.download_button(
-            label="📦 Download Complete HPC Bundle (ZIP)",
+            label=f"📦 Download Complete HPC Verified Bundle as ZIP ({len(successful_files) // 5} files processed)",
             data=zip_buffer,
             file_name="latticeguard_hpc_complete_bundle.zip",
             mime="application/zip",
