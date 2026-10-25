@@ -2,17 +2,20 @@ import streamlit as st
 import math
 
 # ==========================================
-# 1. מנוע ליבה מתקדם עם בדיקת התנגשויות אטומים (Interatomic Distance Check)
+# 1. מנוע הליבה: אבחון מתקדם, הגנה ובדיקות שפיות
 # ==========================================
 
 def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
     issues = []
     audit_trail = []
-    lines = content.splitlines()
+    
+    try:
+        lines = content.splitlines()
+        audit_trail.append(f"Initiated parsing of {len(lines)} lines.")
+    except Exception as e:
+        return content, [{"type": "error", "category": "Parser Error", "message": f"Failed to read file lines: {str(e)}"}], ["Critical parsing failure."]
+
     fixed_lines = []
-    
-    audit_trail.append(f"Initiated parsing of {len(lines)} lines.")
-    
     has_p1 = False
     has_cell_params = False
     atoms = []
@@ -45,7 +48,6 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
                 try:
                     x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
                     
-                    # בדיקת כפילויות תווית
                     if any(a[0] == label for a in atoms):
                         duplicate_atoms_found = True
                         issues.append({
@@ -56,20 +58,18 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
                     
                     atoms.append((label, x, y, z, line_idx))
                 except ValueError:
-                    pass  # לא שורת קואורדינציות תקנית, ממשיכים הלאה
+                    pass
 
         fixed_lines.append(line)
 
-    # בדיקת מרחקים מינימליים בין אטומים (התנגשויות פיזיקליות בסיסיות בקואורדינציות פראקציונליות)
-    # מחפשים אטומים קרובים באופן חשוד (< 0.1 יחידות פראקציונליות)
+    # בדיקת התנגשויות אטומים מרחבית
     for i in range(len(atoms)):
         for j in range(i + 1, len(atoms)):
             l1, x1, y1, z1, idx1 = atoms[i]
             l2, x2, y2, z2, idx2 = atoms[j]
             
-            # חישוב מרחק פראקציונלי מקורב
             dist_sq = (x1 - x2)**2 + (y1 - y2)**2 + (z1 - z2)**2
-            if dist_sq < 0.0001 and dist_sq > 0.0:  # קרובים מדי או חופפים כמעט לחלוטין
+            if dist_sq < 0.0001 and dist_sq > 0.0:
                 issues.append({
                     "type": "error",
                     "category": "Interatomic Clash",
@@ -117,7 +117,7 @@ def validate_fixed_cif(original_content: str, fixed_content: str) -> tuple[bool,
 
 
 # ==========================================
-# 2. ממשק משתמש פרימיום (Elite UI)
+# 2. ממשק משתמש פרימיום: Batch Processing & Elite UI
 # ==========================================
 
 st.set_page_config(
@@ -127,7 +127,7 @@ st.set_page_config(
 )
 
 st.title("🛡️ LatticeGuard")
-st.markdown("### Elite-Tier Pre-Flight HPC CIF Auditor")
+st.markdown("### Elite-Tier Pre-Flight HPC CIF Auditor (Batch Engine)")
 st.markdown("Prevent catastrophic simulation failures in VASP and Quantum ESPRESSO through rigorous pre-flight structural auditing.")
 st.markdown("---")
 
@@ -150,68 +150,70 @@ Si1 0.00000 0.00000 0.00000
 Si2 0.00000 0.00000 0.00000
 """
 
-if "cif_text" not in st.session_state:
-    st.session_state.cif_text = ""
-if "file_name" not in st.session_state:
-    st.session_state.file_name = "structure.cif"
-
 st.sidebar.header("Control Panel")
-if st.sidebar.button("🧪 Load Sample Defective CIF"):
-    st.session_state.cif_text = SAMPLE_CIF
-    st.session_state.file_name = "sample_defective.cif"
-    st.rerun()
+load_sample = st.sidebar.button("🧪 Load Sample Defective CIF")
 
-uploaded_file = st.file_uploader("Upload Structure File", type=["cif", "txt"])
-if uploaded_file is not None:
-    st.session_state.cif_text = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-    st.session_state.file_name = uploaded_file.name
+# תמיכה בהעלאת מספר קבצים במקביל (Batch Processing)
+uploaded_files = st.file_uploader("Upload Structure File(s)", type=["cif", "txt"], accept_multiple_files=True)
 
-if st.session_state.cif_text:
-    with st.expander("📁 View Loaded Raw File Content", expanded=False):
-        st.text_area("Raw CIF", st.session_state.cif_text, height=150)
+files_to_process = []
 
-    if st.button("🚀 Run Pre-Flight Audit & Verification", type="primary", use_container_width=True):
-        with st.spinner("Analyzing crystallographic structure and enforcing safety boundaries..."):
-            fixed_content, issues, audit_trail = audit_and_fix_cif(st.session_state.cif_text)
-            is_valid, validation_errors = validate_fixed_cif(st.session_state.cif_text, fixed_content)
+if load_sample:
+    files_to_process.append(("sample_defective.cif", SAMPLE_CIF))
+elif uploaded_files:
+    for f in uploaded_files:
+        try:
+            content = f.getvalue().decode("utf-8", errors="ignore")
+            files_to_process.append((f.name, content))
+        except Exception as e:
+            st.error(f"Failed to read file {f.name}: {e}")
 
-        # שלב 1: דוח אבחון וסינון
-        st.markdown("---")
-        st.markdown("### 🔍 Step 1: Audit Diagnostic Report")
-        
-        if not issues:
-            st.success("✨ **Audit Clean:** No structural traps or missing parameters identified.")
-        else:
-            for issue in issues:
-                if issue["type"] == "error":
-                    st.error(f"❌ **[{issue['category']}]** {issue['message']}")
-                else:
-                    st.warning(f"⚠️ **[{issue['category']}]** {issue['message']}")
-
-        # הצגת לוג פעולות שקוף (Audit Trail)
-        with st.expander("📋 View Engine Audit Trail & Execution Log", expanded=False):
-            for log_entry in audit_trail:
-                st.text(f"• {log_entry}")
-
-        # שלב 2: אימות ואבטחה
-        st.markdown("---")
-        st.markdown("### 🛡️ Step 2: Safety & Sanity Verification")
-        st.markdown("*Enforcing 'Do No Harm' policy and self-parse integrity before release.*")
-        
-        if is_valid:
-            st.success("✅ **Verification Passed:** Structure is certified safe for simulation pipelines.")
+if files_to_process:
+    st.markdown(f"### 📦 Batch Processing Dashboard ({len(files_to_process)} files loaded)")
+    
+    for file_name, cif_content in files_to_process:
+        with st.container():
+            st.markdown(f"---")
+            st.subheader(f"📄 File: `{file_name}`")
             
-            clean_filename = st.session_state.file_name.replace(".cif", "_fixed.cif")
-            st.download_button(
-                label="📥 Download Verified Clean CIF",
-                data=fixed_content,
-                file_name=clean_filename,
-                mime="chemical/x-cif",
-                use_container_width=True
-            )
-        else:
-            st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld to protect your simulation.")
-            for err in validation_errors:
-                st.warning(err)
+            with st.expander("📁 View Raw Content", expanded=False):
+                st.text_area("Raw CIF", cif_content, height=120, key=f"raw_{file_name}")
+
+            # הרצת אנליזה
+            fixed_content, issues, audit_trail = audit_and_fix_cif(cif_content)
+            is_valid, validation_errors = validate_fixed_cif(cif_content, fixed_content)
+
+            # דוח אבחון
+            st.markdown("#### 🔍 Audit Diagnostic Report")
+            if not issues:
+                st.success("✨ **Audit Clean:** No structural traps or missing parameters identified.")
+            else:
+                for issue in issues:
+                    if issue["type"] == "error":
+                        st.error(f"❌ **[{issue['category']}]** {issue['message']}")
+                    else:
+                        st.warning(f"⚠️ **[{issue['category']}]** {issue['message']}")
+
+            # לוג פעולות
+            with st.expander("📋 View Execution Audit Trail", expanded=False):
+                for log_entry in audit_trail:
+                    st.text(f"• {log_entry}")
+
+            # אימות ואבטחה
+            st.markdown("#### 🛡️ Safety & Sanity Verification")
+            if is_valid:
+                st.success("✅ **Verification Passed:** Structure is certified safe for simulation pipelines.")
+                clean_filename = file_name.replace(".cif", "_fixed.cif")
+                st.download_button(
+                    label=f"📥 Download Verified Clean ({clean_filename})",
+                    data=fixed_content,
+                    file_name=clean_filename,
+                    mime="chemical/x-cif",
+                    key=f"dl_{file_name}"
+                )
+            else:
+                st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld.")
+                for err in validation_errors:
+                    st.warning(err)
 else:
-    st.info("💡 **Get Started:** Click 'Load Sample Defective CIF' in the sidebar or upload your own structure file.")
+    st.info("💡 **Get Started:** Click 'Load Sample Defective CIF' in the sidebar or upload one or multiple `.cif` files for batch processing.")
