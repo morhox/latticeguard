@@ -36,7 +36,6 @@ def calculate_cell_volume(cell):
     cb = math.cos(beta)
     cg = math.cos(gamma)
     
-    # נוסחת נפח מדויקת לסריג כללי
     term = 1.0 - ca**2 - cb**2 - cg**2 + 2.0 * ca * cb * cg
     volume = a * b * c * math.sqrt(max(0.0, term))
     return volume
@@ -80,7 +79,6 @@ def fractional_to_cartesian(x, y, z, cell):
 def check_interatomic_clashes_mic(atoms, cell):
     """
     בדיקת התנגשויות מרחבית תוך שימוש בתנאי שפה מחזוריים (Minimum Image Convention).
-    בודק מרחקים גם מול העתקים של תא היחידה בשלושת הממדים.
     """
     clashes = []
     n = len(atoms)
@@ -99,14 +97,7 @@ def check_interatomic_clashes_mic(atoms, cell):
             dfy = dfy - round(dfy)
             dfz = dfz - round(dfz)
             
-            # המרת ההפרשים הפמוריים חזרה לקרטזיות לצורך מדידת מרחק פיזי מדויק באנגסטרם
-            dx, dy, dz = fractional_to_cartesian(dfx, dfy, fz, cell) if 'z' in cell or True else (0,0,0)
-            # תיקון מדויק להפרשי קרטזיות מתוך המרחק הפמורי המינימלי
-            a = cell.get('a', 1.0)
-            b = cell.get('b', 1.0)
-            c = cell.get('c', 1.0)
-            
-            # חישוב מרחק מקורב/מדויק בעזרת המטריצה על ההפרשים המינימליים
+            # חישוב מרחק פיזי מדויק באנגסטרם בעזרת המטריצה על ההפרשים המינימליים
             cx, cy, cz = fractional_to_cartesian(dfx, dfy, dfz, cell)
             dist = math.sqrt(cx**2 + cy**2 + cz**2)
             
@@ -146,7 +137,6 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
     seen_labels = set()
     duplicate_atoms_found = False
 
-    # שלב א': חילוץ פרמטרי תא יחידה
     for param in ['a', 'b', 'c', 'alpha', 'beta', 'gamma']:
         match = re.search(rf"_cell_length_{param}\s+([0-9\.]+)", content, re.IGNORECASE) or \
                 re.search(rf"_cell_angle_{param}\s+([0-9\.]+)", content, re.IGNORECASE)
@@ -155,7 +145,6 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
             if param in ['a', 'b', 'c']:
                 has_cell_params = True
 
-    # בדיקת נפח תא
     cell_vol = calculate_cell_volume(cell)
     if cell_vol <= 0.0:
         issues.append({
@@ -170,7 +159,6 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
     for line_idx, line in enumerate(lines, 1):
         stripped = line.strip()
         
-        # זיהוי מלכודת סימטריה P1
         if "_symmetry_space_group_name_H-M" in stripped or "_space_group_name_H-M_alt" in stripped:
             if "'P 1'" in stripped or '"P 1"' in stripped or " P1 " in stripped or stripped.endswith("P1") or stripped.endswith("P 1"):
                 has_p1 = True
@@ -181,7 +169,6 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
                 })
                 audit_trail.append(f"Flagged P1 symmetry declaration at line {line_idx}.")
 
-        # איסוף אטומים ובדיקת כפילויות
         if stripped and not stripped.startswith("#") and not stripped.startswith("_") and not stripped.startswith("data_") and not stripped.startswith("loop_"):
             parts = stripped.split()
             if parts and len(parts) >= 4:
@@ -208,7 +195,6 @@ def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
 
         fixed_lines.append(line)
 
-    # בדיקת התנגשויות מתקדמת עם Minimum Image Convention
     if atoms and cell_vol > 0.0:
         clashes = check_interatomic_clashes_mic(atoms, cell)
         if clashes:
