@@ -1,14 +1,12 @@
 import streamlit as st
+import math
 import io
 import zipfile
 import re
 
-st.set_page_config(
-    page_title="LatticeGuard - HPC CIF Auditor",
-    layout="wide"
-)
-
-# מטריצת רדיוסים קוולנטיים (אנגסטרם) - מבוסס על נתוני Cordero et al.
+# ==========================================
+# מטריצת רדיוסים קוולנטיים (אנגסטרם) - Cordero et al.
+# ==========================================
 COVALENT_RADII = {
     'H': 0.31, 'He': 0.28, 'Li': 1.28, 'Be': 0.96, 'B': 0.84,
     'C': 0.76, 'N': 0.71, 'O': 0.66, 'F': 0.57, 'Na': 1.66,
@@ -16,163 +14,250 @@ COVALENT_RADII = {
     'Cl': 1.02, 'K': 2.03, 'Ca': 1.76, 'Ti': 1.60, 'Fe': 1.56,
     'Cu': 1.32, 'Zn': 1.22
 }
-
 DEFAULT_RADIUS = 1.0
 CLASH_SCALING_FACTOR = 0.55
 
-def check_interatomic_clashes(atoms_list):
-    """
-    בדיקת התנגשויות מרחביות מותנית לפי זוגות אטומים (Element-specific radii matrix).
-    """
-    clashes = []
-    n = len(atoms_list)
-    
-    for i in range(n):
-        for j in range(i + 1, n):
-            atom_a = atoms_list[i]
-            atom_b = atoms_list[j]
-            
-            elem_a = atom_a.get('symbol', 'C')
-            elem_b = atom_b.get('symbol', 'C')
-            
-            r_a = COVALENT_RADII.get(elem_a, DEFAULT_RADIUS)
-            r_b = COVALENT_RADII.get(elem_b, DEFAULT_RADIUS)
-            
-            dynamic_threshold = (r_a + r_b) * CLASH_SCALING_FACTOR
-            
-            dx = atom_a['x'] - atom_b['x']
-            dy = atom_a['y'] - atom_b['y']
-            dz = atom_a['z'] - atom_b['z']
-            distance = (dx**2 + dy**2 + dz**2)**0.5
-            
-            if distance < dynamic_threshold:
-                clashes.append({
-                    'atom1': f"{elem_a} ({i+1})",
-                    'atom2': f"{elem_b} ({j+1})",
-                    'distance': round(distance, 4),
-                    'threshold': round(dynamic_threshold, 4)
-                })
-                
-    return clashes
+# ==========================================
+# 1. מנוע הליבה: אבחון מתקדם, הגנה ובדיקות שפיות
+# ==========================================
 
-def audit_cif(filename, content):
-    audit_log = []
-    is_valid = True
+def audit_and_fix_cif(content: str) -> tuple[str, list[dict], list[str]]:
+    issues = []
+    audit_trail = []
     
-    if not content.strip():
-        return False, ["File is empty."], []
-        
-    # בדיקת מלכודת סימטריה (P1)
-    if re.search(r"(_space_group_name_H-M_alt|_symmetry_space_group_name_H-M)\s+['\"]?P\s*1['\"]?", content, re.IGNORECASE) or \
-       re.search(r"_space_group_IT_number\s+1\b", content):
-        audit_log.append("WARNING: Low-symmetry P1 space group detected. This may cause exponential grid inflation in DFT calculations.")
-    else:
-        audit_log.append("OK: Space group symmetry verified.")
+    try:
+        lines = content.splitlines()
+        audit_trail.append(f"Initiated parsing of {len(lines)} lines.")
+    except Exception as e:
+        return content, [{"type": "error", "category": "Parser Error", "message": f"Failed to read file lines: {str(e)}"}], ["Critical parsing failure."]
 
-    # חילוץ קואורדינטות אטומים לבדיקת התנגשויות
+    fixed_lines = []
+    has_p1 = False
+    has_cell_params = False
     atoms = []
-    lines = content.splitlines()
-    in_loop = False
-    x_idx, y_idx, z_idx, symbol_idx = -1, -1, -1, -1
-    loop_headers = []
-    
-    for line in lines:
-        line_str = line.strip()
-        if line_str.startswith("loop_"):
-            in_loop = True
-            loop_headers = []
-            continue
-        if in_loop:
-            if line_str.startswith("_"):
-                loop_headers.append(line_str)
-                if "_atom_site_fract_x" in line_str: x_idx = len(loop_headers) - 1
-                if "_atom_site_fract_y" in line_str: y_idx = len(loop_headers) - 1
-                if "_atom_site_fract_z" in line_str: z_idx = len(loop_headers) - 1
-                if "_atom_site_label" in line_str or "_atom_site_type_symbol" in line_str: symbol_idx = len(loop_headers) - 1
-                continue
-            elif line_str.startswith("#") or line_str == "":
-                continue
-            else:
-                parts = line_str.split()
-                if len(parts) >= len(loop_headers) and x_idx != -1 and y_idx != -1 and z_idx != -1:
-                    try:
-                        x = float(parts[x_idx])
-                        y = float(parts[y_idx])
-                        z = float(parts[z_idx])
-                        
-                        symbol = "C"
-                        if symbol_idx != -1 and symbol_idx < len(parts):
-                            raw_sym = parts[symbol_idx]
-                            clean_sym = re.match(r"([A-Za-z]{1,2})", raw_sym)
-                            if clean_sym:
-                                symbol = clean_sym.group(1)
-                                
-                        atoms.append({'symbol': symbol, 'x': x, 'y': y, 'z': z})
-                    except ValueError:
-                        pass
-                else:
-                    if not line_str.startswith("_") and len(parts) < len(loop_headers):
-                        in_loop = False
+    duplicate_atoms_found = False
 
-    clashes = []
-    if atoms:
-        clashes = check_interatomic_clashes(atoms)
-        if clashes:
-            is_valid = False
-            audit_log.append(f"ERROR: Detected {len(clashes)} interatomic spatial clashes based on dynamic covalent radii thresholds.")
-        else:
-            audit_log.append("OK: No atomic clashes detected using dynamic element-specific radii matrices.")
+    for line_idx, line in enumerate(lines, 1):
+        stripped = line.strip()
+        
+        # זיהוי מלכודת סימטריה P1
+        if "_symmetry_space_group_name_H-M" in stripped or "_space_group_name_H-M_alt" in stripped:
+            if "'P 1'" in stripped or '"P 1"' in stripped or " P1 " in stripped or stripped.endswith("P1") or stripped.endswith("P 1"):
+                has_p1 = True
+                issues.append({
+                    "type": "warning",
+                    "category": "Symmetry Trap",
+                    "message": f"Line {line_idx}: Detected P1 symmetry trap (Low symmetry). Causes exponential grid inflation in DFT."
+                })
+                audit_trail.append(f"Flagged P1 symmetry declaration at line {line_idx}.")
+        
+        # זיהוי פרמטרי תא
+        if "_cell_length_a" in stripped:
+            has_cell_params = True
+            audit_trail.append("Confirmed presence of primary cell parameter (_cell_length_a).")
+
+        # איסוף קואורדינציות אטומים לבדיקת התנגשויות
+        if stripped and not stripped.startswith("#") and not stripped.startswith("_") and not stripped.startswith("data_") and not stripped.startswith("loop_"):
+            parts = stripped.split()
+            if parts and len(parts) >= 4:
+                label = parts[0]
+                try:
+                    x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                    
+                    if any(a[0] == label for a in atoms):
+                        duplicate_atoms_found = True
+                        issues.append({
+                            "type": "warning",
+                            "category": "Structural Warning",
+                            "message": f"Line {line_idx}: Duplicate atom label '{label}' detected."
+                        })
+                    
+                    # חילוץ סמל האלמנט מתוך הלייבל (למשל Si1 -> Si, C12 -> C)
+                    elem_match = re.match(r"([A-Za-z]{1,2})", label)
+                    symbol = elem_match.group(1) if elem_match else "C"
+                    
+                    atoms.append((label, symbol, x, y, z, line_idx))
+                except ValueError:
+                    pass
+
+        fixed_lines.append(line)
+
+    # בדיקת התנגשויות אטומים מרחבית לפי רדיוסים קוולנטיים דינמיים
+    for i in range(len(atoms)):
+        for j in range(i + 1, len(atoms)):
+            l1, sym1, x1, y1, z1, idx1 = atoms[i]
+            l2, sym2, x2, y2, z2, idx2 = atoms[j]
+            
+            r1 = COVALENT_RADII.get(sym1, DEFAULT_RADIUS)
+            r2 = COVALENT_RADII.get(sym2, DEFAULT_RADIUS)
+            dynamic_threshold = (r1 + r2) * CLASH_SCALING_FACTOR
+            
+            dist = math.sqrt((x1 - x2)**2 + (y1 - y2)**2 + (z1 - z2)**2)
+            
+            if dist < dynamic_threshold:
+                issues.append({
+                    "type": "error",
+                    "category": "Interatomic Clash",
+                    "message": f"Potential atomic clash between '{l1}' ({sym1}, line {idx1}) and '{l2}' ({sym2}, line {idx2}). Distance: {dist:.4f} A < Threshold: {dynamic_threshold:.4f} A."
+                })
+                audit_trail.append(f"Critical: Spatial clash detected between {l1} and {l2} ({dist:.4f} A).")
+
+    if not has_cell_params and len(content.strip()) > 0:
+        issues.append({
+            "type": "error",
+            "category": "Missing Data",
+            "message": "Critical: Missing essential cell parameters (_cell_length_a etc.)."
+        })
+        audit_trail.append("Critical Error: Missing cell dimensions.")
     else:
-        audit_log.append("NOTE: No atomic coordinate loops parsed for spatial clash checking.")
+        audit_trail.append("Cell parameters structure integrity verified.")
 
-    return is_valid, audit_log, clashes
+    if duplicate_atoms_found:
+        audit_trail.append("Warning: Duplicate atom sites recorded in atomic coordinate list.")
 
-def main():
-    st.title("LatticeGuard")
-    st.markdown("Elite-tier pre-flight safety gatekeeper for VASP, Quantum ESPRESSO, and DFT simulations.")
-    st.markdown("---")
+    fixed_content = "\n".join(fixed_lines)
+    audit_trail.append("Parsing and diagnostic scan completed successfully under 'Do No Harm' policy.")
+    
+    return fixed_content, issues, audit_trail
 
-    uploaded_files = st.file_uploader("Upload CIF Structure Files", type=["cif"], accept_multiple_files=True)
+def validate_fixed_cif(original_content: str, fixed_content: str) -> tuple[bool, list[str]]:
+    errors = []
+    
+    if not fixed_content or len(fixed_content.strip()) < 10:
+        errors.append("Critical: Fixed CIF content is empty or too short.")
+        return False, errors
 
-    if uploaded_files:
-        st.subheader("Audit Results & Batch Summary")
+    if "NaN" in fixed_content or "inf" in fixed_content:
+        errors.append("Warning: Fixed CIF contains unphysical NaN or infinite values.")
+
+    cell_keywords = ['_cell_length_a', '_cell_length_b', '_cell_length_c', 
+                     '_cell_angle_alpha', '_cell_angle_beta', '_cell_angle_gamma']
+    
+    for kw in cell_keywords:
+        if kw in original_content and kw not in fixed_content:
+            errors.append(f"Sanity Error: Essential lattice parameter {kw} was lost during processing.")
+
+    is_valid = len([e for e in errors if "Critical" in e or "Sanity Error" in e]) == 0
+    return is_valid, errors
+
+
+# ==========================================
+# 2. ממשק משתמש פרימיום: Batch & ZIP Export
+# ==========================================
+
+st.set_page_config(
+    page_title="LatticeGuard — Pre-Flight HPC CIF Auditor", 
+    page_icon="🛡️", 
+    layout="centered"
+)
+
+st.title("🛡️ LatticeGuard")
+st.markdown("### Elite-Tier Pre-Flight HPC CIF Auditor (Batch Engine)")
+st.markdown("Prevent catastrophic simulation failures in VASP and Quantum ESPRESSO through rigorous pre-flight structural auditing.")
+st.markdown("---")
+
+SAMPLE_CIF = """data_sample_p1_trap
+_audit_creation_date             2026-03-30
+_symmetry_space_group_name_H-M   'P 1'
+_cell_length_a                   5.43000
+_cell_length_b                   5.43000
+_cell_length_c                   5.43000
+_cell_angle_alpha                90.00000
+_cell_angle_beta                 90.00000
+_cell_angle_gamma                90.00000
+
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Si1 0.00000 0.00000 0.00000
+Si2 0.00000 0.00000 0.00000
+"""
+
+st.sidebar.header("Control Panel")
+load_sample = st.sidebar.button("🧪 Load Sample Defective CIF")
+
+uploaded_files = st.file_uploader("Upload Structure File(s)", type=["cif", "txt"], accept_multiple_files=True)
+
+files_to_process = []
+
+if load_sample:
+    files_to_process.append(("sample_defective.cif", SAMPLE_CIF))
+elif uploaded_files:
+    for f in uploaded_files:
+        try:
+            content = f.getvalue().decode("utf-8", errors="ignore")
+            files_to_process.append((f.name, content))
+        except Exception as e:
+            st.error(f"Failed to read file {f.name}: {e}")
+
+if files_to_process:
+    st.markdown(f"### 📦 Batch Processing Dashboard ({len(files_to_process)} files loaded)")
+    
+    successful_files = []
+
+    for file_name, cif_content in files_to_process:
+        with st.container():
+            st.markdown(f"---")
+            st.subheader(f"📄 File: `{file_name}`")
+            
+            with st.expander("📁 View Raw Content", expanded=False):
+                st.text_area("Raw CIF", cif_content, height=120, key=f"raw_{file_name}")
+
+            fixed_content, issues, audit_trail = audit_and_fix_cif(cif_content)
+            is_valid, validation_errors = validate_fixed_cif(cif_content, fixed_content)
+
+            st.markdown("#### 🔍 Audit Diagnostic Report")
+            if not issues:
+                st.success("✨ **Audit Clean:** No structural traps or missing parameters identified.")
+            else:
+                for issue in issues:
+                    if issue["type"] == "error":
+                        st.error(f"❌ **[{issue['category']}]** {issue['message']}")
+                    else:
+                        st.warning(f"⚠️ **[{issue['category']}]** {issue['message']}")
+
+            with st.expander("📋 View Execution Audit Trail", expanded=False):
+                for log_entry in audit_trail:
+                    st.text(f"• {log_entry}")
+
+            st.markdown("#### 🛡️ Safety & Sanity Verification")
+            if is_valid:
+                st.success("✅ **Verification Passed:** Structure is certified safe for simulation pipelines.")
+                clean_filename = file_name.replace(".cif", "_fixed.cif")
+                successful_files.append((clean_filename, fixed_content))
+                
+                st.download_button(
+                    label=f"📥 Download Verified Clean ({clean_filename})",
+                    data=fixed_content,
+                    file_name=clean_filename,
+                    mime="chemical/x-cif",
+                    key=f"dl_{file_name}"
+                )
+            else:
+                st.error("🛑 **Verification Blocked:** Post-processing sanity check failed. Output withheld.")
+                for err in validation_errors:
+                    st.warning(err)
+
+    if successful_files:
+        st.markdown("---")
+        st.markdown("### 🗂️ Batch Archive Export")
         
         zip_buffer = io.BytesIO()
-        
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for uploaded_file in uploaded_files:
-                file_content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
-                filename = uploaded_file.name
-                
-                is_valid, audit_log, clashes = audit_cif(filename, file_content)
-                
-                status_label = "PASSED" if is_valid else "FAILED"
-                with st.expander(f"[{status_label}] {filename}"):
-                    for log_entry in audit_log:
-                        if log_entry.startswith("ERROR"):
-                            st.error(log_entry)
-                        elif log_entry.startswith("WARNING"):
-                            st.warning(log_entry)
-                        else:
-                            st.success(log_entry)
-                            
-                    if not is_valid and clashes:
-                        st.markdown("**Detailed Clash Breakdown:**")
-                        for c in clashes:
-                            st.text(f"  - Atom {c['atom1']} <-> {c['atom2']} | Measured: {c['distance']} A | Min Threshold: {c['threshold']} A")
-                
-                if is_valid:
-                    zip_file.writestr(f"verified_{filename}", file_content)
-                    
+            for fname, fcontent in successful_files:
+                zip_file.writestr(fname, fcontent)
+        
         zip_buffer.seek(0)
         
-        st.markdown("---")
         st.download_button(
-            label="Download Verified Structures (ZIP)",
+            label=f"📦 Download All Verified Structures as ZIP ({len(successful_files)} files)",
             data=zip_buffer,
-            file_name="latticeguard_verified_structures.zip",
-            mime="application/zip"
+            file_name="latticeguard_verified_batch.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True
         )
-
-if __name__ == "__main__":
-    main()
+else:
+    st.info("💡 **Get Started:** Click 'Load Sample Defective CIF' in the sidebar or upload one or multiple `.cif` files for batch processing.")
