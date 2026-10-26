@@ -1,0 +1,17 @@
+data_clean_sample
+_audit_creation_date             2026-03-30
+_symmetry_space_group_name_H-M   'P 1'
+_cell_length_a                   5.43000
+_cell_length_b                   5.43000
+_cell_length_c                   5.43000
+_cell_angle_alpha                90.00000
+_cell_angle_beta                 90.00000
+_cell_angle_gamma                90.00000
+
+loop_
+_atom_site_label
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+Si1 0.00000 0.00000 0.00000
+Si2 0.50000 0.50000 0.50000
