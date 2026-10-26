@@ -7,20 +7,13 @@ import json
 import numpy as np
 import pandas as pd
 
-# טעינת ספריות קריסטלוגרפיות ומדעיות מתקדמות עם מנגנון הגנה
+# טעינת ספריות קריסטלוגרפיות בסיסיות בלבד בעלייה (קלות משקל)
 try:
     from pymatgen.core import Structure, Lattice
     from pymatgen.io.vasp import Poscar, Incar, Kpoints
     PYMATGEN_AVAILABLE = True
 except ImportError:
     PYMATGEN_AVAILABLE = False
-
-# ניסיון טעינת מודל MLIP אמיתי (CHGNet)
-try:
-    from chgnet.model.dynamics import CHGNetRelaxer
-    CHGNET_AVAILABLE = True
-except ImportError:
-    CHGNET_AVAILABLE = False
 
 try:
     import spglib
@@ -124,13 +117,19 @@ def parse_structure_production(cif_content: str):
     return atoms, cell, report_dict, issues
 
 # ==========================================
-# מנוע רלקסציה אמיתי מבוסס CHGNet / MLIP
+# מנוע רלקסציה עצל (Lazy Loading) מבוסס CHGNet
 # ==========================================
 def run_production_mlip_relaxation(cell, atoms):
     relaxed_atoms = []
     energy_gain = -0.482
     
-    if CHGNET_AVAILABLE and PYMATGEN_AVAILABLE:
+    try:
+        from chgnet.model.dynamics import CHGNetRelaxer
+        chgnet_available = True
+    except ImportError:
+        chgnet_available = False
+
+    if chgnet_available and PYMATGEN_AVAILABLE:
         try:
             lattice = Lattice.from_parameters(
                 cell['a'], cell['b'], cell['c'], 
@@ -166,20 +165,14 @@ def run_production_mlip_relaxation(cell, atoms):
     return relaxed_atoms, energy_gain, "Fallback Analytical Estimator (Mock)"
 
 # ==========================================
-# מודל חזוי יכולת סינתזה (Synthesizability Predictor)
+# מודל חזוי יכולת סינתזה
 # ==========================================
 def evaluate_synthesizability(cell, atoms):
-    """מעריך את אנרגיית הקונווקס-הול ומדד היתכנות סינתזה מעבדתית"""
-    # חישוב מדדים מבוססי מורכבות סריג ונפח אטומי
     total_atoms = len(atoms)
     volume = cell['a'] * cell['b'] * cell['c']
     vol_per_atom = volume / max(1, total_atoms)
-    
-    # הערכת אנרגיה מעל ההול (Energy Above Hull - eV/atom)
-    # ערך 0.0 מעיד על יציבות תרמודינמית מוחלטת (קל לסינתזה)
     hull_energy = 0.005 if total_atoms <= 8 else 0.045
     
-    # ציון היתכנות סינתזה באחוזים (Synthesizability Probability Score)
     if hull_energy < 0.02:
         score = 94.5
         category = "High Synthesizability (Stable Phase)"
@@ -187,11 +180,11 @@ def evaluate_synthesizability(cell, atoms):
     elif hull_energy < 0.08:
         score = 72.0
         category = "Moderate Synthesizability (Metastable)"
-        recommendation = "שלב מטא-סטביל. דורש בקרת טמפרטורה מדויקת או שימוש במבשרים (Precursors) ספציפיים."
+        recommendation = "שלב מטא-סטביל. דורש בקרת טמפרטורה מדויקת או שימוש במבשרים."
     else:
         score = 31.0
         category = "Low Synthesizability (High Energy Above Hull)"
-        recommendation = "סיכון גבוה להתפרקות פאזית. מומלץ לבצע אופטימיזציה נוספת של הרכב או לחץ."
+        recommendation = "סיכון גבוה להתפרקות פאזית. מומלץ לבצע אופטימיזציה נוספת."
 
     return {
         "hull_energy": round(hull_energy, 4),
@@ -331,7 +324,6 @@ if active_content:
             
         st.info(f"✨ **MLIP Relaxation Completed via `{engine_used}`:** Energy change: **{eng_gain:.4f} eV/atom**.")
 
-        # --- שלב חדש: מודל חזוי יכולת סינתזה ---
         st.markdown("---")
         st.subheader("🧪 Step 3.5: Synthesizability Predictor & Convex Hull")
         
@@ -427,7 +419,8 @@ if active_content:
                 except Exception as ex:
                     st.error(f"SFTP connection error: {ex}")
 
-        st.markdown---()
+        # תוקן כאן מ- st.markdown---() ל- st.markdown("---")
+        st.markdown("---")
         st.subheader("📊 Step 7: Post-Processing & Advanced Analytics")
         
         analysis_tab = st.selectbox("Select Production Module:", [
