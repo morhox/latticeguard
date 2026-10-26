@@ -109,7 +109,6 @@ def simulate_mlip_relaxation(cell, atoms):
     return relaxed_atoms, -0.455
 
 def generate_vasp_inputs(cell, atoms, encut=520, ismeartype=0, sigma=0.05, k_mesh=(6,6,6), enable_optics=False):
-    # POSCAR
     a, b, c = cell.get('a', 5.0), cell.get('b', 5.0), cell.get('c', 5.0)
     v_cx = c * math.cos(math.radians(cell.get('beta', 90.0)))
     v_cy = c * (math.cos(math.radians(cell.get('alpha', 90.0))) - math.cos(math.radians(cell.get('beta', 90.0))) * math.cos(math.radians(cell.get('gamma', 90.0)))) / math.sin(math.radians(cell.get('gamma', 90.0)))
@@ -135,7 +134,6 @@ def generate_vasp_inputs(cell, atoms, encut=520, ismeartype=0, sigma=0.05, k_mes
         for coords in element_coords[sym]:
             poscar += f" {coords[0]:10.6f} {coords[1]:10.6f} {coords[2]:10.6f}\n"
 
-    # INCAR
     incar = f"SYSTEM = Research Simulation (LatticeGuard)\n"
     incar += f"ENCUT = {encut}\n"
     incar += f"ISMEAR = {ismeartype}; SIGMA = {sigma}\n"
@@ -144,7 +142,6 @@ def generate_vasp_inputs(cell, atoms, encut=520, ismeartype=0, sigma=0.05, k_mes
     if enable_optics:
         incar += "LOPTICS = .TRUE. ; NEDOS = 2000 ; NBANDS = 96\n"
 
-    # KPOINTS
     kpoints = f"Automatic mesh\n0\nMonkhorst-Pack\n {k_mesh[0]} {k_mesh[1]} {k_mesh[2]}\n 0 0 0\n"
 
     return poscar, incar, kpoints
@@ -253,7 +250,6 @@ st.title("🔬 LatticeGuard Researcher Suite")
 st.markdown("### High-Integrity DFT Pipeline, Advanced Physics Configurator & HPC Orchestration")
 st.markdown("---")
 
-# --- שלב 1: קלט מחקר (פרומפט טבעי או העלאת קובץ) ---
 st.subheader("📥 Step 1: Structure Input & Discovery")
 input_mode = st.radio("Input Method:", ["💬 Natural Language Prompt", "📂 Upload CIF File"], horizontal=True)
 
@@ -290,7 +286,6 @@ else:
         active_content = uploaded_file.getvalue().decode("utf-8", errors="ignore")
         st.success(f"Loaded `{uploaded_file.name}` successfully.")
 
-# אם יש קלט פעיל, ממשיכים בזרימה טבעית למטה
 if active_content:
     st.markdown("---")
     st.subheader("🛡️ Step 2: Gatekeeper & Structural Audit")
@@ -308,14 +303,13 @@ if active_content:
     if is_valid:
         st.success("✅ **Gatekeeper Certified:** Ready for physics configuration.")
 
-        # --- שלב 3: הגדרות DFT פיזיקליות לחוקרים ---
         st.markdown("---")
         st.subheader("⚙️ Step 3: DFT Physics & VASP Parameters")
         
         col_p1, col_p2 = st.columns(2)
         with col_p1:
             encut = st.number_input("Plane-wave cutoff (ENCUT, eV)", min_value=200, max_value=1000, value=520, step=10)
-            ismear = st.selectbox("Smearing method (ISMEAR)", [0, 1, 2, -5], index=0, help="0 for semiconductors/insulators, -5 for tetrahedron, 1/2 for metals")
+            ismear = st.selectbox("Smearing method (ISMEAR)", [0, 1, 2, -5], index=0)
         with col_p2:
             sigma = st.number_input("Smearing width (SIGMA, eV)", min_value=0.01, max_value=0.5, value=0.05, step=0.01)
             k_grid_x = st.number_input("K-points X", min_value=1, max_value=20, value=6)
@@ -330,7 +324,6 @@ if active_content:
             k_mesh=(k_grid_x, k_grid_y, k_grid_z), enable_optics=enable_optics
         )
 
-        # --- שלב 4: חבילות הורדה לחוקר (ZIP מלא) ---
         st.markdown("---")
         st.subheader("📥 Step 4: VASP Input Bundle Exporters")
         
@@ -340,8 +333,9 @@ if active_content:
         with c3: st.download_button("📥 KPOINTS", kpoints, file_name="KPOINTS")
         with c4: st.download_button("📥 Report JSON", json.dumps(report_dict, indent=2), file_name="report.json")
 
+        # תיקון תקלות ה-ZIP המוגדר כאן עם ZIP_DEFLATED התקין
         zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZipDeflated) as zf:
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr("POSCAR", poscar)
             zf.writestr("INCAR", incar)
             zf.writestr("KPOINTS", kpoints)
@@ -355,7 +349,6 @@ if active_content:
             type="primary"
         )
 
-        # --- שלב 5: תזמור קלאסטר (SLURM & SFTP) ---
         st.markdown("---")
         st.subheader("🚀 Step 5: HPC Cluster Dispatcher & SLURM")
         
@@ -390,7 +383,6 @@ if active_content:
                 except Exception as ex:
                     st.error(f"SFTP connection error: {ex}")
 
-        # --- שלב 6: מעקב עבודות וניתוח תוצאות ---
         st.markdown("---")
         st.subheader("📊 Step 6: Live Cluster Monitor & Diagnostics")
         jobs_df = pd.DataFrame([
@@ -402,7 +394,6 @@ if active_content:
         col_m1.metric("SCF Total Energy", "-142.854 eV", "Converged")
         col_m2.metric("Estimated Band Gap", "1.12 eV", "Direct Gap")
 
-        # סימולציית אבחון שגיאות לוגים (Error Diagnostic Agent)
         with st.expander("🛠️ VASP Log Diagnostics Agent"):
             st.info("Log analysis: `vasp.out` shows smooth electronic convergence. No imaginary frequencies or structural divergence detected.")
     else:
