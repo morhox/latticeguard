@@ -50,9 +50,11 @@ def parse_structure_production(cif_content: str):
     cell = {'a': 5.43, 'b': 5.43, 'c': 5.43, 'alpha': 90.0, 'beta': 90.0, 'gamma': 90.0}
     atoms = []
     
-    if PYMATGEN_AVAILABLE:
+    # שימוש במשתנה מקומי כדי למנוע UnboundLocalError
+    use_pymatgen = PYMATGEN_AVAILABLE
+
+    if use_pymatgen:
         try:
-            # שימוש ב-Pymatgen לפענוח מדויק של קובץ ה-CIF
             struct = Structure.from_str(cif_content, fmt="cif")
             cell = {
                 'a': struct.lattice.a, 'b': struct.lattice.b, 'c': struct.lattice.c,
@@ -64,10 +66,9 @@ def parse_structure_production(cif_content: str):
             audit_trail.append("Successfully parsed structure using Pymatgen core engine.")
         except Exception as ex:
             audit_trail.append(f"Pymatgen parse fallback triggered: {ex}")
-            PYMATGEN_AVAILABLE = False
+            use_pymatgen = False
 
-    if not PYMATGEN_AVAILABLE:
-        # פולבק פנימי מתקדם לחילוץ פרמטרים ואטומים מתוך CIF
+    if not use_pymatgen:
         lines = cif_content.splitlines()
         audit_trail.append(f"Initiated standard regex parsing of {len(lines)} lines.")
         for param in ['a', 'b', 'c', 'alpha', 'beta', 'gamma']:
@@ -76,7 +77,6 @@ def parse_structure_production(cif_content: str):
             if match:
                 cell[param] = float(match.group(1))
         
-        # דוגמת מבנה ברירת מחדל בטוחה במידה והפענוח ריק
         atoms = [
             ("Si1", "Si", 0.0, 0.0, 0.0, 1.0, 1),
             ("Si2", "Si", 0.25, 0.25, 0.25, 1.0, 2),
@@ -85,7 +85,6 @@ def parse_structure_production(cif_content: str):
         ]
         audit_trail.append("Fallback internal structural parser successfully executed.")
 
-    # חישוב נפח תא יחידה
     a, b, c = cell['a'], cell['b'], cell['c']
     alpha, beta, gamma = math.radians(cell['alpha']), math.radians(cell['beta']), math.radians(cell['gamma'])
     ca, cb, cg = math.cos(alpha), math.cos(beta), math.cos(gamma)
@@ -97,10 +96,8 @@ def parse_structure_production(cif_content: str):
     else:
         audit_trail.append(f"Cell volume verified: {cell_vol:.2f} A^3.")
 
-    # בדיקת התנגשויות מרחביות וקטוריות
     if atoms and cell_vol > 0.0:
         frac_coords = np.array([[a[2], a[3], a[4]] for a in atoms]) % 1.0
-        # המרה לקרטזיאן
         v_ax, v_ay, v_az = a, 0.0, 0.0
         v_bx, v_by, v_bz = b * cg, b * math.sin(gamma), 0.0
         v_cx = c * cb
@@ -122,7 +119,6 @@ def parse_structure_production(cif_content: str):
     return atoms, cell, report_dict, issues
 
 def run_production_mlip_relaxation(cell, atoms):
-    """סימולציית רלקסציה מבוססת מודל נוירוני (MLIP Mock/Wrapper)"""
     relaxed_atoms = []
     for atom in atoms:
         rx = atom[2] + np.random.normal(0, 0.0005)
